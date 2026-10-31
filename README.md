@@ -2,7 +2,7 @@
 
 A local-first AI image generation and editing studio built on **FLUX.2 Klein 4B**.
 
-[ImageGen Studio](./README_hero.png)
+![ImageGen Studio](./README_hero.png)
 
 - **Async queue**: generations run in the background with bounded concurrency, persist across restarts, and retry transient errors automatically.
 - **Variants**: up to 8 images per prompt, each with its own seed (fixed seeds give reproducible results: `seed`, `seed+1`, …).
