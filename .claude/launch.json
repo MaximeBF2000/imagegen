@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "studio",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "port": 3000
+    },
+    {
+      "name": "studio-mock",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "IMAGE_PROVIDER=mock TEXT_PROVIDER=mock DATA_DIR=/private/tmp/claude-501/-Users-maximebf-Desktop-Desk-programming-projects-webapps-imagegen/76012c8a-a7c2-4e10-bd7a-93e87732423a/scratchpad/demo-data pnpm dev"],
+      "port": 3000
+    }
+  ]
+}
