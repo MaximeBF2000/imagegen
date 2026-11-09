@@ -1,0 +1,11 @@
+{
+  "name": "inference",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local FLUX.2 [klein] server (Python, diffusers). Managed with uv.",
+  "scripts": {
+    "dev": "uv run python server.py",
+    "start": "uv run python server.py",
+    "setup": "uv sync && uv run hf download black-forest-labs/FLUX.2-klein-4B --exclude '*.jpg' --exclude 'flux-2-klein-4b.safetensors'"
+  }
+}

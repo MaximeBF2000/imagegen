@@ -1,0 +1,50 @@
+# Imagegen Studio: web + API in containers. FLUX.2 [klein] runs natively on the
+# Mac (Metal GPU) and is started/stopped automatically with the `api` container
+# by the host supervisor (scripts/inference-supervisor.sh).
+#
+#   docker compose up -d     # start (builds on first run)
+#   docker compose down      # stop (also unloads the model)
+#
+# No `restart:` policy on purpose: nothing starts until you run `up`.
+name: imagegen
+
+services:
+  api:
+    build:
+      context: .
+      target: api
+    image: imagegen-api
+    ports:
+      - "127.0.0.1:4310:4310"
+    # Settings come straight from the project's .env (not from the shell, which
+    # may hold stale exported copies); container-specific values are fixed below.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      IMAGEGEN_IGNORE_DOTENV: "1"
+      API_PORT: "4310"
+      API_PUBLIC_URL: http://localhost:4310
+      DATA_DIR: /data
+      IMAGE_PROVIDER: local
+      # The native FLUX server on the Mac (see scripts/inference-supervisor.sh)
+      INFERENCE_URL: http://host.docker.internal:8000
+      # Ollama on the Mac (only used with TEXT_PROVIDER=openai-compatible)
+      TEXT_BASE_URL: http://host.docker.internal:11434/v1
+    volumes:
+      # Same library as `pnpm dev` (images, thumbnails, SQLite database).
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:4310
+    image: imagegen-web
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api

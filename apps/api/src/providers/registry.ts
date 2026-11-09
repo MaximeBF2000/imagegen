@@ -1,23 +1,23 @@
 import type { AppConfig } from '../config.js';
 import { MockImageProvider, MockTextProvider } from './mock.providers.js';
 import { OpenAICompatibleTextProvider } from './openai-compatible-text.provider.js';
-import { OpenRouterImageProvider } from './openrouter-image.provider.js';
+import { LocalImageProvider, LocalTextProvider } from './local-diffusers.provider.js';
 import type { ImageProvider, TextProvider } from './types.js';
 
 /**
  * Provider registry: maps the IMAGE_PROVIDER / TEXT_PROVIDER env values to
- * implementations. Add your local engine here, e.g.
+ * implementations. Add another engine (ComfyUI, MLX, a remote API...) here, e.g.
  *
- *   local: (cfg) => new DiffusersImageProvider(cfg.image.model, process.env.LOCAL_URL)
+ *   comfy: (cfg) => new ComfyImageProvider(process.env.COMFY_URL)
  */
 const imageProviders: Record<string, (cfg: AppConfig) => ImageProvider> = {
-  openrouter: (cfg) => new OpenRouterImageProvider(cfg.image.model, cfg.openrouter),
+  local: (cfg) => new LocalImageProvider(cfg.image.model, cfg.inference.url),
   mock: () => new MockImageProvider(),
 };
 
 const textProviders: Record<string, (cfg: AppConfig) => TextProvider> = {
   'openai-compatible': (cfg) => new OpenAICompatibleTextProvider(cfg.text),
-  openrouter: (cfg) => new OpenAICompatibleTextProvider(cfg.text),
+  local: (cfg) => new LocalTextProvider(cfg.inference.url),
   mock: () => new MockTextProvider(),
 };
 

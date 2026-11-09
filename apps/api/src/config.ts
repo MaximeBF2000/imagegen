@@ -8,8 +8,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(here, '..', '..', '..');
 
 // Load the single root-level .env so the user only has one file to edit.
-for (const file of [path.join(REPO_ROOT, '.env'), path.join(REPO_ROOT, 'apps/api/.env')]) {
-  if (existsSync(file)) dotenv.config({ path: file, quiet: true });
+// It overrides inherited variables: shell helpers (e.g. the zsh dotenv plugin)
+// export stale copies of it. Set IMAGEGEN_IGNORE_DOTENV=1 to skip (tests).
+if (!process.env.IMAGEGEN_IGNORE_DOTENV) {
+  for (const file of [path.join(REPO_ROOT, '.env'), path.join(REPO_ROOT, 'apps/api/.env')]) {
+    if (existsSync(file)) dotenv.config({ path: file, quiet: true, override: true });
+  }
 }
 
 const str = (name: string, fallback = '') => (process.env[name] ?? '').trim() || fallback;
@@ -18,7 +22,7 @@ const int = (name: string, fallback: number) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-const port = int('API_PORT', 4000);
+const port = int('API_PORT', 4310);
 
 export const config = {
   port,
@@ -31,28 +35,32 @@ export const config = {
   dataDir: path.resolve(REPO_ROOT, str('DATA_DIR', 'data')),
 
   queue: {
-    concurrency: Math.max(1, int('QUEUE_CONCURRENCY', 2)),
+    // One local GPU: jobs run one at a time (the inference server serializes anyway).
+    concurrency: Math.max(1, int('QUEUE_CONCURRENCY', 1)),
     maxAttempts: Math.max(1, int('QUEUE_MAX_ATTEMPTS', 3)),
   },
 
   image: {
-    /** Which ImageProvider implementation to use: openrouter | mock */
-    provider: str('IMAGE_PROVIDER', 'openrouter'),
-    model: str('IMAGE_MODEL', 'black-forest-labs/flux.2-klein-4b'),
+    /** Which ImageProvider implementation to use: local | mock */
+    provider: str('IMAGE_PROVIDER', 'local'),
+    model: str('IMAGE_MODEL', 'black-forest-labs/FLUX.2-klein-4B'),
   },
 
   text: {
-    /** Which TextProvider implementation to use: openai-compatible | mock */
-    provider: str('TEXT_PROVIDER', 'openai-compatible'),
-    model: str('TEXT_MODEL', 'google/gemini-3.5-flash-lite'),
-    /** Any OpenAI-compatible endpoint: OpenRouter, Ollama, LM Studio, vLLM... */
-    baseUrl: str('TEXT_BASE_URL', 'https://openrouter.ai/api/v1').replace(/\/$/, ''),
-    apiKey: str('TEXT_API_KEY') || str('OPENROUTER_API_KEY'),
+    /**
+     * Prompt enhancer LLM: local (FLUX.2 klein's own Qwen3 text encoder, served by
+     * the inference server) | openai-compatible (Ollama, LM Studio...) | mock
+     */
+    provider: str('TEXT_PROVIDER', 'local'),
+    /** Only used by openai-compatible. */
+    model: str('TEXT_MODEL', 'qwen3-vl:8b'),
+    baseUrl: str('TEXT_BASE_URL', 'http://localhost:11434/v1').replace(/\/$/, ''),
+    apiKey: str('TEXT_API_KEY'),
   },
 
-  openrouter: {
-    apiKey: str('OPENROUTER_API_KEY'),
-    baseUrl: str('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1').replace(/\/$/, ''),
+  /** Python diffusers server (apps/inference). */
+  inference: {
+    url: str('INFERENCE_URL', `http://127.0.0.1:${int('INFERENCE_PORT', 8000)}`).replace(/\/$/, ''),
   },
 };
 

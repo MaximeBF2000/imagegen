@@ -1,7 +1,7 @@
-import { Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
 import { config } from '../config.js';
 import { DatabaseService, type JobRow } from '../db/database.service.js';
-import { ProviderError } from '../providers/types.js';
+import { IMAGE_PROVIDER, type ImageProvider, ProviderError } from '../providers/types.js';
 import { EventsService } from './events.service.js';
 import { GenerationRunner } from './generation-runner.service.js';
 
@@ -16,11 +16,13 @@ export class QueueService implements OnApplicationBootstrap, OnApplicationShutdo
   private pending: string[] = [];
   private readonly running = new Map<string, AbortController>();
   private stopped = false;
+  private waitTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly db: DatabaseService,
     private readonly runner: GenerationRunner,
     private readonly events: EventsService,
+    @Inject(IMAGE_PROVIDER) private readonly provider: ImageProvider,
   ) {}
 
   onApplicationBootstrap() {
@@ -35,6 +37,7 @@ export class QueueService implements OnApplicationBootstrap, OnApplicationShutdo
 
   onApplicationShutdown() {
     this.stopped = true;
+    if (this.waitTimer) clearTimeout(this.waitTimer);
     for (const ctrl of this.running.values()) ctrl.abort(new Error('shutdown'));
   }
 
@@ -77,6 +80,15 @@ export class QueueService implements OnApplicationBootstrap, OnApplicationShutdo
   }
 
   private tick() {
+    // Hold jobs while the model is loading / the inference server is down,
+    // instead of burning their retries.
+    if (this.pending.length && this.provider.readiness()) {
+      this.waitTimer ??= setTimeout(() => {
+        this.waitTimer = null;
+        this.tick();
+      }, 2000);
+      return;
+    }
     while (!this.stopped && this.running.size < config.queue.concurrency && this.pending.length) {
       const id = this.pending.shift()!;
       void this.process(id);

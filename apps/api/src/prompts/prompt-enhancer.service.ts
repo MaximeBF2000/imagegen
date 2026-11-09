@@ -13,7 +13,7 @@ Guidelines:
 - Be concrete and visual: materials, colors, textures, time of day, lens/framing (e.g. "35mm, shallow depth of field") when photographic.
 - Keep the user's intent, subject, and any explicit details or quoted text EXACTLY. Never contradict them.
 - Infer a fitting style if none is given (photo, illustration, 3D render...), and make it explicit.
-- Text that must appear in the image goes in double quotes.
+- Use double quotes ONLY for words the user explicitly wants written in the image (signs, labels). Otherwise never add quoted words or keyword lists.
 - No negative prompts ("no X"), no weights, no parameters, no markdown.
 - 40 to 110 words. Same language as the user.
 

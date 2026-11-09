@@ -33,7 +33,13 @@ export function useFolders() {
 }
 
 export function useConfig() {
-  return useQuery({ queryKey: keys.config, queryFn: api.config, refetchInterval: (q) => (q.state.error ? 5000 : 60_000), retry: false });
+  return useQuery({
+    queryKey: keys.config,
+    queryFn: api.config,
+    // Poll quickly while the API or the model is starting up.
+    refetchInterval: (q) => (q.state.error || q.state.data?.ready === false ? 2500 : 60_000),
+    retry: false,
+  });
 }
 
 export function useQueueStats() {

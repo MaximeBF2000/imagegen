@@ -32,6 +32,7 @@ before(async () => {
   server = spawn(process.execPath, [path.join(here, '..', 'dist', 'main.js')], {
     env: {
       ...process.env,
+      IMAGEGEN_IGNORE_DOTENV: '1',
       IMAGE_PROVIDER: 'mock',
       TEXT_PROVIDER: 'mock',
       API_PORT: String(PORT),

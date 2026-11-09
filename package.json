@@ -2,13 +2,19 @@
   "name": "imagegen",
   "private": true,
   "version": "0.1.0",
-  "description": "AI image generation & editing studio (Next.js + NestJS)",
+  "description": "AI image generation & editing studio (Next.js + NestJS + local FLUX.2 via diffusers)",
   "scripts": {
     "dev": "pnpm -r --parallel --stream run dev",
     "build": "pnpm -r run build",
     "start": "pnpm -r --parallel --stream run start",
     "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm --filter api run build && pnpm --filter api run test"
+    "test": "pnpm --filter api run build && pnpm --filter api run test",
+    "setup:model": "pnpm --filter inference run setup",
+    "docker:agent:install": "./scripts/install-inference-agent.sh",
+    "docker:agent:uninstall": "./scripts/install-inference-agent.sh --uninstall",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "tail -f ~/Library/Logs/imagegen/supervisor.log ~/Library/Logs/imagegen/inference.log"
   },
   "packageManager": "pnpm@9.8.0",
   "engines": {

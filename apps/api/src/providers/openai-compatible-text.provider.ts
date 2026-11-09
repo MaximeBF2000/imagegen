@@ -2,9 +2,9 @@ import type { AppConfig } from '../config.js';
 import { ProviderError, type TextCompletionRequest, type TextProvider } from './types.js';
 
 /**
- * Chat completion against any OpenAI-compatible endpoint.
- * Defaults to OpenRouter, but Ollama (http://localhost:11434/v1), LM Studio,
- * vLLM or llama.cpp servers work by changing TEXT_BASE_URL / TEXT_MODEL.
+ * Chat completion against any OpenAI-compatible endpoint: Ollama
+ * (http://localhost:11434/v1, the default), LM Studio, vLLM, llama.cpp...
+ * Unlike the local provider, vision models here can see reference images.
  */
 export class OpenAICompatibleTextProvider implements TextProvider {
   readonly id = 'openai-compatible';
@@ -15,10 +15,7 @@ export class OpenAICompatibleTextProvider implements TextProvider {
   }
 
   readiness() {
-    const isOpenRouter = this.cfg.baseUrl.includes('openrouter.ai');
-    return isOpenRouter && !this.cfg.apiKey
-      ? 'OPENROUTER_API_KEY is not set. Add it to the .env file at the repository root and restart.'
-      : null;
+    return null;
   }
 
   async complete(req: TextCompletionRequest): Promise<string> {
@@ -43,8 +40,6 @@ export class OpenAICompatibleTextProvider implements TextProvider {
         headers: {
           'Content-Type': 'application/json',
           ...(this.cfg.apiKey ? { Authorization: `Bearer ${this.cfg.apiKey}` } : {}),
-          'HTTP-Referer': 'http://localhost',
-          'X-Title': 'Imagegen Studio',
         },
         body: JSON.stringify({
           model: this.model,
@@ -72,6 +67,7 @@ export class OpenAICompatibleTextProvider implements TextProvider {
     const content = JSON.parse(text)?.choices?.[0]?.message?.content;
     const out = Array.isArray(content) ? content.map((c: any) => c?.text ?? '').join('') : content;
     if (typeof out !== 'string' || !out.trim()) throw new ProviderError('LLM returned an empty response', true);
-    return out.trim();
+    // Reasoning models may prepend their thinking.
+    return out.replace(/^[\s\S]*<\/think>/, '').trim();
   }
 }

@@ -55,8 +55,9 @@ export class GenerationRunner {
           referenceImages: inputs.slice(1),
           inpaint: { image: source, mask },
         });
-        output = res.data;
-        meta = res.meta;
+        // Composite anyway: the VAE round-trip slightly alters pixels outside the mask.
+        output = await this.compositeThroughMask(source, res.data, mask);
+        meta = { ...res.meta, inpaint: 'native' };
       } else {
         // Emulated inpainting: show the model the area to change, then composite
         // the result through the (feathered) mask so pixels outside stay untouched.

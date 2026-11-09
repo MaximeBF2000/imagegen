@@ -1,0 +1,19 @@
+[project]
+name = "imagegen-inference"
+version = "0.1.0"
+description = "Local FLUX.2 [klein] inference server (diffusers) for Imagegen Studio"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "torch>=2.9",
+  "diffusers>=0.42",
+  "transformers>=4.57",
+  "accelerate>=1.10",
+  "safetensors",
+  "pillow",
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "huggingface_hub>=0.35",
+]
+
+[tool.uv]
+package = false

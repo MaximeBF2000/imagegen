@@ -7,7 +7,11 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+    // Long-lived SSE connections would otherwise block shutdown (and dev restarts).
+    forceCloseConnections: true,
+  });
   // Larger JSON bodies so automations can send inline base64 images.
   app.useBodyParser('json', { limit: '60mb' });
   app.useBodyParser('urlencoded', { extended: true, limit: '1mb' });

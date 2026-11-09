@@ -1,0 +1,13 @@
+**/node_modules
+**/.next
+**/dist
+**/*.tsbuildinfo
+**/.venv
+**/__pycache__
+.env
+.env.*
+!.env.example
+data
+.git
+.claude
+README_hero.png

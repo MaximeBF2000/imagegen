@@ -60,6 +60,8 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
 
+  apps/inference: {}
+
   apps/web:
     dependencies:
       '@radix-ui/react-dialog':

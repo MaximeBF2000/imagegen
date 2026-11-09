@@ -1,6 +1,6 @@
 import type { AppConfig, Asset, CreateGenerationInput, Folder, FolderList, FolderScope, Generation, GenerationPage, QueueStats } from './types';
 
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000').replace(/\/$/, '');
+export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4310').replace(/\/$/, '');
 const TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || '';
 
 export class ApiError extends Error {

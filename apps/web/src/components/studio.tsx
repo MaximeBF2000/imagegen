@@ -1,6 +1,6 @@
 'use client';
 
-import { KeyRound } from 'lucide-react';
+import { Cpu, Loader2 } from 'lucide-react';
 import { useEffect } from 'react';
 import { useConfig, useLiveEvents } from '@/lib/queries';
 import { useComposer, useUi } from '@/lib/store';
@@ -44,19 +44,7 @@ export function Studio() {
       <div className="mx-auto flex max-w-[1680px]">
         <Sidebar />
         <main className="min-w-0 flex-1 px-4 pb-28 sm:px-6">
-          {config && !config.ready && (
-            <div className="mt-5 flex items-start gap-3 rounded-xl border border-warn/25 bg-warn/[0.07] p-4 text-sm animate-fade-in">
-              <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
-              <div>
-                <div className="font-medium text-warn">Almost ready: one setting is missing</div>
-                {config.issues.map((issue) => (
-                  <p key={issue} className="mt-0.5 text-muted">
-                    {issue}
-                  </p>
-                ))}
-              </div>
-            </div>
-          )}
+          {config && !config.ready && <ReadinessBanner issues={config.issues} />}
           <div className="z-20 -mx-4 bg-gradient-to-b from-bg via-bg/95 to-transparent px-4 pb-6 pt-5 sm:-mx-6 sm:px-6 lg:sticky lg:top-[60px]">
             <div className="mx-auto max-w-3xl">
               <Composer />
@@ -72,5 +60,30 @@ export function Studio() {
       <DropZone />
       <FolderDialogs />
     </>
+  );
+}
+
+function ReadinessBanner({ issues }: { issues: string[] }) {
+  const loading = issues.some((i) => i.startsWith('Loading'));
+  return (
+    <div
+      className={
+        'mt-5 flex items-start gap-3 rounded-xl border p-4 text-sm animate-fade-in ' +
+        (loading ? 'border-accent/25 bg-accent/[0.06]' : 'border-warn/25 bg-warn/[0.07]')
+      }
+    >
+      {loading ? <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-accent" /> : <Cpu className="mt-0.5 h-4 w-4 shrink-0 text-warn" />}
+      <div>
+        <div className={loading ? 'font-medium text-accent' : 'font-medium text-warn'}>
+          {loading ? 'Warming up the model' : 'The local model isn’t available'}
+        </div>
+        {issues.map((issue) => (
+          <p key={issue} className="mt-0.5 text-muted">
+            {issue}
+          </p>
+        ))}
+        {!loading && <p className="mt-1 text-xs text-subtle">You can still queue generations: they'll run as soon as the model is ready.</p>}
+      </div>
+    </div>
   );
 }
