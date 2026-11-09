@@ -9,6 +9,7 @@ import {
   IMAGE_PROVIDER,
   type ImageProvider,
   type InputImage,
+  modelOrDefault,
 } from '../providers/types.js';
 import { EventsService } from './events.service.js';
 
@@ -40,7 +41,9 @@ export class GenerationRunner {
 
     const ratio = gen.aspect_ratio as AspectRatio | 'auto';
     const { width, height } = dimensionsFor(ratio, inputs[0]);
-    const base = { aspectRatio: ratio, width, height, seed: job.seed, signal };
+    const model = modelOrDefault(this.provider, gen.model);
+    const caps = model.capabilities;
+    const base = { model: model.id, aspectRatio: ratio, width, height, seed: job.seed, signal };
 
     let output: Buffer;
     let meta: Record<string, unknown> | undefined;
@@ -48,7 +51,7 @@ export class GenerationRunner {
     if (gen.mask_id && inputs[0]) {
       const source = inputs[0];
       const mask = await this.normalizedMask(gen.mask_id, source);
-      if (this.provider.capabilities.nativeInpainting) {
+      if (caps.nativeInpainting) {
         const res = await this.provider.generate({
           ...base,
           prompt,
@@ -70,7 +73,7 @@ export class GenerationRunner {
             `Edit the first image. The second image is the exact same picture where the region to modify is highlighted in red. ` +
             `Inside the highlighted region only: ${prompt}. ` +
             `Everything outside the highlighted region must remain identical to the first image. The final image must not contain any red highlight.`,
-          referenceImages: [source, marked, ...inputs.slice(1)].slice(0, this.provider.capabilities.maxReferenceImages),
+          referenceImages: [source, marked, ...inputs.slice(1)].slice(0, caps.maxReferenceImages),
         });
         output = await this.compositeThroughMask(source, res.data, mask);
         meta = { ...res.meta, inpaint: 'emulated' };
@@ -79,7 +82,7 @@ export class GenerationRunner {
       const res = await this.provider.generate({
         ...base,
         prompt,
-        referenceImages: inputs.slice(0, this.provider.capabilities.maxReferenceImages),
+        referenceImages: inputs.slice(0, caps.maxReferenceImages),
       });
       output = res.data;
       meta = res.meta;

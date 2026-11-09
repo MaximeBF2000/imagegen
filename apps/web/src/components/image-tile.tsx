@@ -59,6 +59,7 @@ export function useImageActions() {
       create.mutate(
         {
           prompt: gen.prompt,
+          model: gen.model,
           inputImageIds: [job.image.id],
           count: 4,
           aspectRatio: 'auto',

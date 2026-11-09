@@ -1,11 +1,11 @@
 'use client';
 
-import { Code2, Search, X } from 'lucide-react';
+import { Check, ChevronDown, Code2, Search, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { useConfig, useQueueStats } from '@/lib/queries';
-import { useUi } from '@/lib/store';
-import { cn, prettyModel } from '@/lib/utils';
-import { Button, Kbd, Tip } from './ui/primitives';
+import { useActiveModel, useConfig, useQueueStats } from '@/lib/queries';
+import { useComposer, useUi } from '@/lib/store';
+import { cn } from '@/lib/utils';
+import { Button, Kbd, Menu, MenuItem, MenuLabel, Tip } from './ui/primitives';
 
 export function Header({ connected }: { connected: boolean }) {
   const { data: config } = useConfig();
@@ -22,13 +22,7 @@ export function Header({ connected }: { connected: boolean }) {
             Imagegen <span className="font-normal text-subtle">Studio</span>
           </span>
         </a>
-        {config && (
-          <Tip label={`${config.image.provider} · ${config.image.model}`} side="bottom">
-            <span className="hidden rounded-md border border-line bg-surface px-2 py-0.5 text-[11px] font-medium text-muted md:inline">
-              {prettyModel(config.image.model)}
-            </span>
-          </Tip>
-        )}
+        {config && <ModelPicker />}
 
         <div className="ml-auto flex items-center gap-2">
           <SearchBox />
@@ -151,5 +145,37 @@ export function Logo({ className }: { className?: string }) {
         <path d="M19 15l.7 1.8 1.8.7-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7z" fill="currentColor" stroke="none" opacity=".8" />
       </svg>
     </span>
+  );
+}
+
+/** Picks the image model used for new generations (remembered across visits). */
+function ModelPicker() {
+  const { data: config } = useConfig();
+  const active = useActiveModel();
+  const setModel = useComposer((s) => s.setModel);
+  const models = config?.image.models ?? [];
+  if (!active) return null;
+  return (
+    <Menu
+      align="start"
+      trigger={
+        <button
+          type="button"
+          aria-label="Image model"
+          className="flex items-center gap-1 rounded-md border border-line bg-surface px-2 py-0.5 text-[11px] font-medium text-muted transition-colors hover:border-line-strong hover:text-fg"
+        >
+          {active.label}
+          {models.length > 1 && <ChevronDown className="h-3 w-3" />}
+        </button>
+      }
+    >
+      <MenuLabel>Image model</MenuLabel>
+      {models.map((m) => (
+        <MenuItem key={m.id} icon={m.id === active.id ? <Check /> : undefined} onSelect={() => setModel(m.id)}>
+          <span className="block">{m.label}</span>
+          {m.description && <span className="block max-w-[280px] text-[11px] leading-snug text-subtle">{m.description}</span>}
+        </MenuItem>
+      ))}
+    </Menu>
   );
 }

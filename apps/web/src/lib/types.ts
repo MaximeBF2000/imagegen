@@ -66,13 +66,29 @@ export interface QueueStats {
   concurrency: number;
 }
 
+export interface ModelCapabilities {
+  maxReferenceImages: number;
+  nativeInpainting: boolean;
+  aspectRatios: AspectRatio[];
+  seed: boolean;
+}
+
+export interface ImageModelInfo {
+  id: string;
+  label: string;
+  description?: string;
+  capabilities: ModelCapabilities;
+}
+
 export interface AppConfig {
   ready: boolean;
   issues: string[];
   image: {
     provider: string;
+    /** Default model id. */
     model: string;
-    capabilities: { maxReferenceImages: number; nativeInpainting: boolean; aspectRatios: AspectRatio[]; seed: boolean };
+    capabilities: ModelCapabilities;
+    models: ImageModelInfo[];
   };
   text: { provider: string; model: string };
   queue: QueueStats;
@@ -82,6 +98,8 @@ export interface AppConfig {
 
 export interface CreateGenerationInput {
   prompt: string;
+  /** Image model id; the server default when omitted. */
+  model?: string;
   count?: number;
   aspectRatio?: AspectRatio;
   seed?: number;

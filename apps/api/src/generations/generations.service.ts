@@ -3,7 +3,7 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from '@nes
 import { filter, firstValueFrom, map, race, timer } from 'rxjs';
 import { type AssetDto, AssetsService } from '../assets/assets.service.js';
 import { DatabaseService, type GenerationRow, type JobRow, type JobStatus } from '../db/database.service.js';
-import { IMAGE_PROVIDER, type ImageProvider } from '../providers/types.js';
+import { findModel, IMAGE_PROVIDER, type ImageProvider, modelOrDefault } from '../providers/types.js';
 import { EventsService } from './events.service.js';
 import type { CreateGenerationDto, ListGenerationsQuery, UpdateGenerationDto } from './generations.dto.js';
 import { QueueService } from './queue.service.js';
@@ -72,9 +72,14 @@ export class GenerationsService {
     if (maskId && !inputIds.length) throw new BadRequestException('Inpainting needs an input image (the mask applies to the first one)');
     if (dto.folderId) this.assertFolder(dto.folderId);
 
-    const maxRefs = this.provider.capabilities.maxReferenceImages - (maskId && !this.provider.capabilities.nativeInpainting ? 1 : 0);
+    const model = dto.model ? findModel(this.provider, dto.model) : modelOrDefault(this.provider);
+    if (!model) {
+      throw new BadRequestException(`Unknown model "${dto.model}". Available: ${this.provider.models.map((m) => m.id).join(', ')}`);
+    }
+    const caps = model.capabilities;
+    const maxRefs = caps.maxReferenceImages - (maskId && !caps.nativeInpainting ? 1 : 0);
     if (inputIds.length > maxRefs) {
-      throw new BadRequestException(`This model accepts at most ${maxRefs} input image(s)${maskId ? ' when inpainting' : ''}`);
+      throw new BadRequestException(`${model.label} accepts at most ${maxRefs} input image(s)${maskId ? ' when inpainting' : ''}`);
     }
 
     const count = dto.count ?? 1;
@@ -88,7 +93,7 @@ export class GenerationsService {
       count,
       seed: dto.seed ?? null,
       provider: this.provider.id,
-      model: this.provider.model,
+      model: model.id,
       input_ids: JSON.stringify(inputIds),
       mask_id: maskId,
       label: dto.label?.trim() || null,

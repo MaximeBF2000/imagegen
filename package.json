@@ -2,7 +2,7 @@
   "name": "imagegen",
   "private": true,
   "version": "0.1.0",
-  "description": "AI image generation & editing studio (Next.js + NestJS + local FLUX.2 via diffusers)",
+  "description": "AI image generation & editing studio (Next.js + NestJS + local FLUX.2 / Qwen-Image via diffusers)",
   "scripts": {
     "dev": "pnpm -r --parallel --stream run dev",
     "build": "pnpm -r run build",
@@ -14,7 +14,9 @@
     "docker:agent:uninstall": "./scripts/install-inference-agent.sh --uninstall",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
-    "docker:logs": "tail -f ~/Library/Logs/imagegen/supervisor.log ~/Library/Logs/imagegen/inference.log"
+    "docker:logs": "tail -f ~/Library/Logs/imagegen/supervisor.log ~/Library/Logs/imagegen/inference.log",
+    "setup:flux": "pnpm --filter inference run setup:flux",
+    "setup:qwen": "pnpm --filter inference run setup:qwen"
   },
   "packageManager": "pnpm@9.8.0",
   "engines": {

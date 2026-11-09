@@ -4,10 +4,10 @@ import { Ban, Brush, ChevronDown, Copy, CornerUpLeft, ImageIcon, MoreHorizontal,
 import { memo, useState } from 'react';
 import { toast } from 'sonner';
 import { api, withToken } from '@/lib/api';
-import { useAction, useConfig, useCreateGeneration, useDeleteGeneration, visibleJobs } from '@/lib/queries';
+import { useAction, useConfig, useCreateGeneration, useDeleteGeneration, useModelLabel, visibleJobs } from '@/lib/queries';
 import { useComposer, useUi } from '@/lib/store';
 import type { Generation } from '@/lib/types';
-import { cn, copyText, prettyModel, ratioOf, timeAgo } from '@/lib/utils';
+import { cn, copyText, ratioOf, timeAgo } from '@/lib/utils';
 import { CopyablePrompt } from './copyable-prompt';
 import { MoveToFolderSub } from './folders';
 import { ImageTile } from './image-tile';
@@ -23,6 +23,7 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
   const [showEnhanced, setShowEnhanced] = useState(true);
   const [expanded, setExpanded] = useState(false);
   const { data: config } = useConfig();
+  const modelLabel = useModelLabel();
   const composer = useComposer();
   const create = useCreateGeneration();
   const remove = useDeleteGeneration();
@@ -53,6 +54,7 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
     create.mutate(
       {
         prompt: gen.prompt,
+        model: gen.model,
         count: gen.count,
         aspectRatio: gen.aspectRatio,
         inputImageIds: gen.inputImages.map((a) => a.id),
@@ -88,7 +90,7 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
               {jobs.filter((j) => j.status === 'succeeded').length}/{jobs.length} images
               {jobs.length < gen.jobs.length && <span className="text-subtle"> (+{gen.jobs.length - jobs.length} elsewhere)</span>}
             </span>
-            <span>{prettyModel(gen.model)}</span>
+            <span>{modelLabel(gen.model)}</span>
             {gen.label && <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted">{gen.label}</span>}
             <time dateTime={gen.createdAt} title={new Date(gen.createdAt).toLocaleString()}>
               {timeAgo(gen.createdAt)}

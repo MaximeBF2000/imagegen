@@ -5,8 +5,8 @@ import { type InputImage, TEXT_PROVIDER, type TextProvider } from '../providers/
 
 export type EnhanceMode = 'generate' | 'edit' | 'inpaint';
 
-const BASE_RULES = `You are an expert prompt engineer for FLUX.2, a state-of-the-art diffusion image model.
-FLUX.2 understands natural language best: write flowing descriptive prose, not tag lists or keyword soup.
+const BASE_RULES = `You are an expert prompt engineer for Nano Banana, a state-of-the-art diffusion image model.
+Nano Banana understands natural language best: write flowing descriptive prose, not tag lists or keyword soup.
 
 Guidelines:
 - Lead with the main subject and action, then setting, then composition/camera, then lighting, then style/mood.

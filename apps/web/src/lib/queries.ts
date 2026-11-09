@@ -11,7 +11,9 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from './api';
-import type { CreateGenerationInput, FolderList, FolderScope, Generation, GenerationPage, ImageEntry, Job, QueueStats } from './types';
+import { useComposer } from './store';
+import type { CreateGenerationInput, FolderList, FolderScope, Generation, GenerationPage, ImageEntry, ImageModelInfo, Job, QueueStats } from './types';
+import { prettyModel } from './utils';
 
 type Feed = InfiniteData<GenerationPage, string | null>;
 
@@ -40,6 +42,20 @@ export function useConfig() {
     refetchInterval: (q) => (q.state.error || q.state.data?.ready === false ? 2500 : 60_000),
     retry: false,
   });
+}
+
+/** The image model picked in the UI, falling back to the server default (or if the pick no longer exists). */
+export function useActiveModel(): ImageModelInfo | undefined {
+  const { data: config } = useConfig();
+  const picked = useComposer((s) => s.model);
+  const models = config?.image.models ?? [];
+  return models.find((m) => m.id === picked) ?? models.find((m) => m.id === config?.image.model) ?? models[0];
+}
+
+/** Display name for a model id stored on a generation. */
+export function useModelLabel() {
+  const { data: config } = useConfig();
+  return (id: string) => config?.image.models.find((m) => m.id === id)?.label ?? prettyModel(id);
 }
 
 export function useQueueStats() {

@@ -61,6 +61,28 @@ test('config reports providers', async () => {
   const { body } = await api('GET', '/config');
   assert.equal(body.ready, true);
   assert.equal(body.image.provider, 'mock');
+  assert.equal(body.image.model, 'mock-gradient');
+  assert.deepEqual(body.image.models.map((m) => m.id), ['mock-gradient', 'mock-gradient-alt']);
+});
+
+test('generations pick a model, default to IMAGE_MODEL, and reject unknown ones', async () => {
+  const def = (await api('POST', '/generations', { prompt: 'default model' })).body;
+  assert.equal(def.model, 'mock-gradient');
+
+  const alt = (await api('POST', '/generations', { prompt: 'alt model', model: 'mock-gradient-alt' })).body;
+  assert.equal(alt.model, 'mock-gradient-alt');
+  const { body: done } = await api('GET', `/generations/${alt.id}/wait?timeout=30`);
+  assert.equal(done.status, 'completed');
+
+  const bad = await api('POST', '/generations', { prompt: 'x', model: 'nope' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body.message, /Unknown model/);
+
+  // Per-model limits: the alt model takes at most 2 input images.
+  const ref = `data:image/png;base64,${(await png(64, 64, '#0f0')).toString('base64')}`;
+  const tooMany = await api('POST', '/generations', { prompt: 'x', model: 'mock-gradient-alt', inputImages: [ref, ref, ref] });
+  assert.equal(tooMany.status, 400);
+  assert.match(tooMany.body.message, /at most 2/);
 });
 
 test('text-to-image with variants runs through the queue', async () => {

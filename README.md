@@ -1,6 +1,9 @@
 # Imagegen Studio
 
-A fully local AI image generation and editing studio built on **[FLUX.2 [klein] 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)**, running on your own GPU through 🤗 diffusers (Apple Silicon/Metal, CUDA, or CPU).
+A fully local AI image generation and editing studio, running on your own GPU through 🤗 diffusers (Apple Silicon/Metal, CUDA, or CPU). Switch models from the header at any time:
+
+- **[FLUX.2 [klein] 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)**: fast (4 steps), multi-reference editing, native inpainting.
+- **Qwen-Image 2.1 Turbo, Q8 GGUF**: the [Q8_0 denoiser](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-GGUF) with the [Q8_0 uncensored Qwen3-VL text encoder](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF) (8 steps). Strong text rendering, multi-reference editing; inpainting is emulated.
 
 ![ImageGen Studio](./README_hero.png)
 
@@ -25,7 +28,9 @@ pnpm install
 pnpm setup:model
 ```
 
-`pnpm setup:model` creates the Python env (`apps/inference/.venv`) and downloads the model (~16 GB) into the **default Hugging Face cache** (`~/.cache/huggingface/hub`, or `$HF_HOME`), not into the app.
+`pnpm setup:model` creates the Python env (`apps/inference/.venv`) and downloads both models (~16 GB + ~17 GB) into the **default Hugging Face cache** (`~/.cache/huggingface/hub`, or `$HF_HOME`), not into the app. Use `pnpm setup:flux` or `pnpm setup:qwen` to fetch only one.
+
+Pick the model in the header menu; your choice is remembered and each generation records the model it used ("Run again" reuses it). Only one model stays in memory: the first job for the other model swaps it in. `IMAGE_MODEL` in `.env` sets the default.
 
 Then, every time:
 
@@ -89,7 +94,7 @@ apps/
 data/         SQLite database + images (created at runtime, git-ignored)
 ```
 
-- **Inference** (`apps/inference/server.py`): loads `Flux2KleinPipeline` once (bf16 on Metal/CUDA) and shares its weights with `Flux2KleinInpaintPipeline`. It exposes `POST /generate` (text-to-image, multi-reference editing, inpainting → PNG), `POST /enhance` (chat with the Qwen3 text encoder), `POST /cancel/:id` and `GET /health`. GPU work is serialized.
+- **Inference** (`apps/inference/server.py`): keeps one model resident and swaps it on demand. FLUX.2 klein loads `Flux2KleinPipeline` (bf16) and shares its weights with `Flux2KleinInpaintPipeline`. Qwen-Image (`qwen_gguf.py`) runs `QwenImage21Pipeline` with the GGUF denoiser kept at Q8 (dequantized per layer), the GGUF text encoder mapped into transformers' `Qwen3VLForConditionalGeneration`, and the encoder's vision tower range-fetched from the official checkpoint so reference images work. It exposes `POST /generate` (with a `model` id), `POST /enhance` (chat with the resident model's Qwen text encoder), `POST /models/:id/load`, `POST /cancel/:id` and `GET /health`. GPU work and model swaps are serialized.
 
 - **Storage**: SQLite through Node's built-in `node:sqlite` (no native build step) and image files on disk. Thumbnails are WebP, generated lazily with `sharp`.
 - **Queue** (`apps/api/src/generations/queue.service.ts`): FIFO with `QUEUE_CONCURRENCY` workers. Interrupted jobs are re-queued on boot. Retryable failures (network, 429, 5xx) back off exponentially, up to `QUEUE_MAX_ATTEMPTS`.
@@ -104,7 +109,7 @@ interface ImageProvider { generate(req: ImageGenerationRequest): Promise<ImageGe
 interface TextProvider  { complete(req: TextCompletionRequest): Promise<string>; ... }
 ```
 
-- **Another diffusers model**: set `IMAGE_MODEL` to another FLUX.2 klein repo (e.g. the 9B). For other model families, adapt `apps/inference/server.py`.
+- **Another local model**: add a loader to `MODELS` in `apps/inference/server.py` (see `qwen_gguf.py` for a GGUF example) and the same id with its capabilities to `apps/api/src/providers/models.ts`. It then shows up in the model picker and in `GET /api/config` → `image.models`.
 - **Another engine** (ComfyUI, MLX, a remote API…): implement `ImageProvider`, register it in `apps/api/src/providers/registry.ts`, and set `IMAGE_PROVIDER=<name>`. `mock.providers.ts` is the smallest example. Set `capabilities.nativeInpainting = false` if your engine has no mask support; the app then emulates inpainting with a marked reference plus mask compositing.
 - **Prompt enhancer via Ollama** (sees reference images): set `TEXT_PROVIDER=openai-compatible`, `TEXT_BASE_URL=http://localhost:11434/v1` and `TEXT_MODEL=qwen3-vl:8b` (any OpenAI-compatible server works).
 
@@ -113,9 +118,9 @@ The rest of the app (queue, UI, API) is provider-agnostic.
 ## API cheat-sheet
 
 ```bash
-# Queue a generation (returns immediately)
+# Queue a generation (returns immediately). "model" is optional (default: IMAGE_MODEL)
 curl -X POST localhost:4310/api/generations -H 'Content-Type: application/json' \
-  -d '{"prompt":"a cozy cabin at dusk","count":4,"aspectRatio":"16:9","enhance":true}'
+  -d '{"prompt":"a cozy cabin at dusk","count":4,"aspectRatio":"16:9","enhance":true,"model":"qwen-image-2.1-turbo"}'
 
 # Wait until finished (long-poll)
 curl localhost:4310/api/generations/<id>/wait?timeout=120

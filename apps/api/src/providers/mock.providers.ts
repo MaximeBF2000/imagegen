@@ -15,13 +15,19 @@ import {
  */
 export class MockImageProvider implements ImageProvider {
   readonly id = 'mock';
-  readonly model = 'mock-gradient';
-  readonly capabilities = {
-    maxReferenceImages: 4,
-    nativeInpainting: false,
-    aspectRatios: [...ASPECT_RATIOS, 'auto'] as const,
-    seed: true,
-  };
+  readonly defaultModel = 'mock-gradient';
+  readonly models = [
+    {
+      id: 'mock-gradient',
+      label: 'Mock gradient',
+      capabilities: { maxReferenceImages: 4, nativeInpainting: false, aspectRatios: [...ASPECT_RATIOS, 'auto'] as const, seed: true },
+    },
+    {
+      id: 'mock-gradient-alt',
+      label: 'Mock gradient (alt)',
+      capabilities: { maxReferenceImages: 2, nativeInpainting: false, aspectRatios: [...ASPECT_RATIOS, 'auto'] as const, seed: true },
+    },
+  ];
 
   constructor(private readonly delayMs = 2500) {}
 
@@ -54,7 +60,7 @@ export class MockImageProvider implements ImageProvider {
       const overlay = await sharp(Buffer.from(svg)).ensureAlpha(0.45).png().toBuffer();
       img = sharp(base).composite([{ input: overlay, blend: 'over' }]);
     }
-    return { data: await img.png().toBuffer(), mime: 'image/png', meta: { mock: true } };
+    return { data: await img.png().toBuffer(), mime: 'image/png', meta: { mock: true, model: req.model } };
   }
 }
 

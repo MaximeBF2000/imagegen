@@ -1,12 +1,19 @@
 """
-Local FLUX.2 [klein] inference server (Hugging Face diffusers).
+Local image model inference server (Hugging Face diffusers).
 
-Keeps the model resident on the GPU (Apple Metal / CUDA / CPU fallback) and
-exposes a tiny HTTP API used by the NestJS API:
+Keeps one image model resident on the GPU (Apple Metal / CUDA / CPU fallback)
+and swaps it when a request asks for another one from the MODELS registry:
 
-  GET  /health            -> loading state, device, model
+  - flux2-klein-4b        FLUX.2 [klein] 4B (bf16): text-to-image, multi-reference editing, inpainting
+  - qwen-image-2.1-turbo  Qwen-Image 2.1 Turbo, Q8 GGUF denoiser + Q8 GGUF uncensored Qwen3-VL encoder
+                          (see qwen_gguf.py): text-to-image and multi-reference editing
+
+Tiny HTTP API used by the NestJS API:
+
+  GET  /health            -> loading state, device, loaded model, available models
   POST /generate          -> PNG bytes (text-to-image, multi-reference editing, inpainting)
-  POST /enhance           -> {"text": ...} chat completion with the model's own Qwen3 text encoder
+  POST /enhance           -> {"text": ...} chat completion with the loaded model's own text encoder
+  POST /models/{id}/load  -> switch the resident model now (generate does it on demand)
   POST /cancel/{request}  -> interrupt a running generation
 
 Weights are loaded from the default Hugging Face cache (~/.cache/huggingface/hub,
@@ -16,13 +23,15 @@ or $HF_HOME); nothing is stored in the app folder.
 from __future__ import annotations
 
 import base64
+import gc
 import io
 import logging
 import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 from pathlib import Path
 
@@ -53,9 +62,10 @@ from fastapi.responses import Response  # noqa: E402
 from PIL import Image, ImageFilter  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-MODEL_ID = os.environ.get("IMAGE_MODEL", "black-forest-labs/FLUX.2-klein-4B")
-DEFAULT_STEPS = int(os.environ.get("INFERENCE_STEPS", "4"))
-DEFAULT_GUIDANCE = float(os.environ.get("INFERENCE_GUIDANCE", "1.0"))
+FLUX_REPO = "black-forest-labs/FLUX.2-klein-4B"
+# FLUX.2 klein only: 4 steps / guidance 1.0 is what the distilled model is tuned for.
+FLUX_STEPS = int(os.environ.get("INFERENCE_STEPS", "4"))
+FLUX_GUIDANCE = float(os.environ.get("INFERENCE_GUIDANCE", "1.0"))
 
 log = logging.getLogger("inference")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [inference] %(message)s")
@@ -72,43 +82,116 @@ def pick_device() -> tuple[str, torch.dtype]:
     return "cpu", torch.float32
 
 
+@dataclass
+class Loaded:
+    """A resident model: its pipelines plus the causal LM used by the prompt enhancer."""
+
+    id: str
+    pipe: object
+    tokenizer: object
+    lm: object
+    inpaint_pipe: object = None
+
+
+def load_flux(device: str, dtype: torch.dtype) -> Loaded:
+    from diffusers import Flux2KleinInpaintPipeline, Flux2KleinPipeline
+
+    try:
+        pipe = Flux2KleinPipeline.from_pretrained(FLUX_REPO, torch_dtype=dtype, local_files_only=True)
+    except Exception:
+        log.info("Model not fully in the local Hugging Face cache, downloading…")
+        pipe = Flux2KleinPipeline.from_pretrained(FLUX_REPO, torch_dtype=dtype)
+    pipe.to(device)
+    pipe.set_progress_bar_config(disable=True)
+    # Same weights, second pipeline: no extra memory.
+    inpaint = Flux2KleinInpaintPipeline.from_pipe(pipe)
+    inpaint.set_progress_bar_config(disable=True)
+    return Loaded("flux2-klein-4b", pipe, pipe.tokenizer, pipe.text_encoder, inpaint)
+
+
+def load_qwen(device: str, dtype: torch.dtype) -> Loaded:
+    import qwen_gguf
+
+    pipe = qwen_gguf.load_pipeline(dtype)
+    pipe.to(device)
+    pipe.set_progress_bar_config(disable=True)
+    return Loaded("qwen-image-2.1-turbo", pipe, pipe.processor.tokenizer, pipe.text_encoder)
+
+
+@dataclass
+class ModelSpec:
+    label: str
+    load: Callable[[str, torch.dtype], Loaded]
+    #: Pixel dimensions are rounded to this multiple.
+    multiple: int = 16
+
+
+MODELS: dict[str, ModelSpec] = {
+    "flux2-klein-4b": ModelSpec("FLUX.2 [klein] 4B", load_flux),
+    "qwen-image-2.1-turbo": ModelSpec("Qwen-Image 2.1 Turbo (Q8 GGUF)", load_qwen, multiple=32),
+}
+ALIASES = {FLUX_REPO: "flux2-klein-4b"}
+
+
+def resolve_model(model_id: Optional[str]) -> str:
+    model_id = ALIASES.get(model_id or "", model_id) or DEFAULT_MODEL
+    if model_id not in MODELS:
+        raise HTTPException(400, f"Unknown model {model_id!r}. Available: {', '.join(MODELS)}")
+    return model_id
+
+
+DEFAULT_MODEL = ALIASES.get(os.environ.get("IMAGE_MODEL", ""), os.environ.get("IMAGE_MODEL") or "flux2-klein-4b")
+if DEFAULT_MODEL not in MODELS:
+    DEFAULT_MODEL = "flux2-klein-4b"
+
+
 class Engine:
-    """Owns the pipelines. All GPU work is serialized behind a single lock."""
+    """Owns the resident model. All GPU work (and model swaps) is serialized behind a single lock."""
 
     def __init__(self) -> None:
         self.device, self.dtype = pick_device()
         self.status = "loading"
         self.error: Optional[str] = None
-        self.pipe = None
-        self.inpaint_pipe = None
+        self.model_id = DEFAULT_MODEL  # loaded, or being loaded
+        self.current: Optional[Loaded] = None
         self.lock = threading.Lock()
         self.cancelled: set[str] = set()
         self.loaded_in: Optional[float] = None
 
-    def load(self) -> None:
-        try:
-            from diffusers import Flux2KleinInpaintPipeline, Flux2KleinPipeline
+    def startup(self) -> None:
+        with self.lock:
+            self._switch(DEFAULT_MODEL)
 
-            started = time.time()
-            log.info("Loading %s on %s (%s)…", MODEL_ID, self.device, self.dtype)
-            try:
-                pipe = Flux2KleinPipeline.from_pretrained(MODEL_ID, torch_dtype=self.dtype, local_files_only=True)
-            except Exception:
-                log.info("Model not fully in the local Hugging Face cache, downloading…")
-                pipe = Flux2KleinPipeline.from_pretrained(MODEL_ID, torch_dtype=self.dtype)
-            pipe.to(self.device)
-            pipe.set_progress_bar_config(disable=True)
-            # Same weights, second pipeline: no extra memory.
-            self.inpaint_pipe = Flux2KleinInpaintPipeline.from_pipe(pipe)
-            self.inpaint_pipe.set_progress_bar_config(disable=True)
-            self.pipe = pipe
-            self.loaded_in = time.time() - started
-            self.status = "ready"
-            log.info("Model ready in %.1fs", self.loaded_in)
+    def ensure(self, model_id: str) -> float:
+        """Make `model_id` resident (caller holds the lock). Returns the load time, 0 if it already was."""
+        if self.current and self.current.id == model_id:
+            return 0.0
+        return self._switch(model_id)
+
+    def _switch(self, model_id: str) -> float:
+        spec = MODELS[model_id]
+        self.model_id, self.status, self.error = model_id, "loading", None
+        if self.current is not None:
+            log.info("Unloading %s…", self.current.id)
+            self.current = None
+            gc.collect()
+            if self.device == "mps":
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+        started = time.time()
+        log.info("Loading %s on %s (%s)…", spec.label, self.device, self.dtype)
+        try:
+            self.current = spec.load(self.device, self.dtype)
         except Exception as exc:  # noqa: BLE001
             log.exception("Model failed to load")
             self.status = "error"
             self.error = f"{type(exc).__name__}: {exc}"
+            raise HTTPException(500, f"{spec.label} failed to load: {self.error}") from exc
+        self.loaded_in = time.time() - started
+        self.status = "ready"
+        log.info("%s ready in %.1fs", spec.label, self.loaded_in)
+        return self.loaded_in
 
     # -- image ----------------------------------------------------------------
 
@@ -120,86 +203,107 @@ class Engine:
 
         return callback
 
-    def generate(self, req: "GenerateRequest") -> tuple[Image.Image, float]:
-        self._require_ready()
+    def generate(self, req: "GenerateRequest") -> tuple[Image.Image, float, float]:
+        model_id = resolve_model(req.model)
         with self.lock:
             if req.request_id and req.request_id in self.cancelled:
                 self.cancelled.discard(req.request_id)
                 raise Cancelled()
+            load_seconds = self.ensure(model_id)
+            m = self.current
             started = time.time()
             generator = torch.Generator("cpu").manual_seed(req.seed)
             refs = [decode_image(r) for r in req.references]
-            common = dict(
-                prompt=req.prompt,
-                num_inference_steps=req.steps or DEFAULT_STEPS,
-                guidance_scale=req.guidance if req.guidance is not None else DEFAULT_GUIDANCE,
-                generator=generator,
-                callback_on_step_end=self._interrupt_cb(req.request_id),
-            )
+            multiple = MODELS[model_id].multiple
+            callback = self._interrupt_cb(req.request_id)
             with torch.inference_mode():
-                if req.inpaint:
-                    source = decode_image(req.inpaint.image)
-                    mask = decode_image(req.inpaint.mask, mode="L")
-                    width, height = snap(source.width), snap(source.height)
-                    # Soft edges blend the new content into its surroundings.
-                    blur = max(4, round(min(width, height) / 96))
-                    mask = mask.resize(source.size).filter(ImageFilter.GaussianBlur(blur))
-                    pipe = self.inpaint_pipe
-                    pipe._interrupt = False
-                    image = pipe(
-                        image=source,
-                        mask_image=mask,
-                        image_reference=refs or None,
-                        strength=req.inpaint.strength,
-                        width=width,
-                        height=height,
-                        **common,
+                if model_id == "qwen-image-2.1-turbo":
+                    if req.inpaint:
+                        raise HTTPException(400, "Qwen-Image 2.1 has no native inpainting (the API emulates it)")
+                    # Steps and sigmas come from the checkpoint (8-step Turbo schedule), guidance is off.
+                    image = m.pipe(
+                        prompt=req.prompt,
+                        image=refs or None,
+                        width=snap(req.width, multiple),
+                        height=snap(req.height, multiple),
+                        generator=generator,
+                        callback_on_step_end=callback,
                     ).images[0]
                 else:
-                    pipe = self.pipe
-                    pipe._interrupt = False
-                    image = pipe(
-                        image=refs or None,
-                        width=snap(req.width),
-                        height=snap(req.height),
-                        **common,
-                    ).images[0]
+                    common = dict(
+                        prompt=req.prompt,
+                        num_inference_steps=req.steps or FLUX_STEPS,
+                        guidance_scale=req.guidance if req.guidance is not None else FLUX_GUIDANCE,
+                        generator=generator,
+                        callback_on_step_end=callback,
+                    )
+                    if req.inpaint:
+                        source = decode_image(req.inpaint.image)
+                        mask = decode_image(req.inpaint.mask, mode="L")
+                        width, height = snap(source.width, multiple), snap(source.height, multiple)
+                        # Soft edges blend the new content into its surroundings.
+                        blur = max(4, round(min(width, height) / 96))
+                        mask = mask.resize(source.size).filter(ImageFilter.GaussianBlur(blur))
+                        pipe = m.inpaint_pipe
+                        pipe._interrupt = False
+                        image = pipe(
+                            image=source,
+                            mask_image=mask,
+                            image_reference=refs or None,
+                            strength=req.inpaint.strength,
+                            width=width,
+                            height=height,
+                            **common,
+                        ).images[0]
+                    else:
+                        pipe = m.pipe
+                        pipe._interrupt = False
+                        image = pipe(
+                            image=refs or None,
+                            width=snap(req.width, multiple),
+                            height=snap(req.height, multiple),
+                            **common,
+                        ).images[0]
             if req.request_id and req.request_id in self.cancelled:
                 self.cancelled.discard(req.request_id)
                 raise Cancelled()
             if self.device == "mps":
                 torch.mps.empty_cache()
-            return image, time.time() - started
+            return image, time.time() - started, load_seconds
+
+    def load(self, model_id: str) -> float:
+        with self.lock:
+            return self.ensure(resolve_model(model_id))
 
     # -- text (prompt enhancer) -----------------------------------------------
 
     def enhance(self, req: "EnhanceRequest") -> str:
-        """Chat completion using FLUX.2 klein's Qwen3 text encoder (a full causal LM)."""
+        """Chat completion with the resident model's text encoder (Qwen3 / Qwen3-VL, both full causal LMs)."""
         self._require_ready()
-        tok = self.pipe.tokenizer
-        model = self.pipe.text_encoder
-        messages = [{"role": "system", "content": req.system}, {"role": "user", "content": req.user}]
-        try:
-            text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-        except TypeError:
-            text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        with self.lock, torch.inference_mode():
-            inputs = tok(text, return_tensors="pt").to(self.device)
-            out = model.generate(
-                **inputs,
-                max_new_tokens=req.max_tokens,
-                do_sample=req.temperature > 0,
-                temperature=max(req.temperature, 1e-3),
-                top_p=0.9,
-                pad_token_id=tok.pad_token_id or tok.eos_token_id,
-            )
+        with self.lock:
+            tok, model = self.current.tokenizer, self.current.lm
+            messages = [{"role": "system", "content": req.system}, {"role": "user", "content": req.user}]
+            try:
+                text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            except TypeError:
+                text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            with torch.inference_mode():
+                inputs = tok(text, return_tensors="pt").to(self.device)
+                out = model.generate(
+                    **inputs,
+                    max_new_tokens=req.max_tokens,
+                    do_sample=req.temperature > 0,
+                    temperature=max(req.temperature, 1e-3),
+                    top_p=0.9,
+                    pad_token_id=tok.pad_token_id or tok.eos_token_id,
+                )
         completion = tok.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
         return strip_thinking(completion).strip()
 
     def _require_ready(self) -> None:
         if self.status == "loading":
             raise HTTPException(503, "The model is still loading, try again in a moment.")
-        if self.status == "error":
+        if self.status == "error" or self.current is None:
             raise HTTPException(500, f"The model failed to load: {self.error}")
 
 
@@ -207,8 +311,8 @@ class Cancelled(Exception):
     pass
 
 
-def snap(n: int) -> int:
-    return max(256, min(2048, int(round(n / 16)) * 16))
+def snap(n: int, multiple: int = 16) -> int:
+    return max(256, min(2048, int(round(n / multiple)) * multiple))
 
 
 def decode_image(data: str, mode: str = "RGB") -> Image.Image:
@@ -229,7 +333,13 @@ engine = Engine()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    threading.Thread(target=engine.load, daemon=True).start()
+    def startup():
+        try:
+            engine.startup()
+        except HTTPException:
+            pass  # recorded in engine.status / engine.error
+
+    threading.Thread(target=startup, daemon=True).start()
     yield
 
 
@@ -243,6 +353,7 @@ class InpaintInput(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    model: Optional[str] = None
     prompt: str
     width: int = 1024
     height: int = 1024
@@ -266,23 +377,31 @@ def health():
     return {
         "status": engine.status,
         "error": engine.error,
-        "model": MODEL_ID,
+        "model": engine.model_id,
+        "defaultModel": DEFAULT_MODEL,
+        "models": [{"id": k, "label": v.label} for k, v in MODELS.items()],
         "device": engine.device,
         "dtype": str(engine.dtype).replace("torch.", ""),
         "loadSeconds": engine.loaded_in,
-        "defaults": {"steps": DEFAULT_STEPS, "guidance": DEFAULT_GUIDANCE},
     }
 
 
 @app.post("/generate")
 async def generate(req: GenerateRequest):
     try:
-        image, seconds = await run_in_threadpool(engine.generate, req)
+        image, seconds, load_seconds = await run_in_threadpool(engine.generate, req)
     except Cancelled:
         raise HTTPException(499, "Canceled")
     buf = io.BytesIO()
     image.save(buf, format="PNG")
-    return Response(buf.getvalue(), media_type="image/png", headers={"X-Inference-Seconds": f"{seconds:.2f}"})
+    headers = {"X-Inference-Seconds": f"{seconds:.2f}", "X-Load-Seconds": f"{load_seconds:.2f}"}
+    return Response(buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.post("/models/{model_id}/load")
+async def load_model(model_id: str):
+    seconds = await run_in_threadpool(engine.load, model_id)
+    return {"model": engine.model_id, "loadSeconds": seconds}
 
 
 @app.post("/enhance")

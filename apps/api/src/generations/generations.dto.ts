@@ -29,6 +29,12 @@ export class CreateGenerationDto {
   @MaxLength(4000)
   prompt: string;
 
+  @ApiPropertyOptional({ example: 'flux2-klein-4b', description: 'Image model id (see GET /api/config → image.models). Defaults to the configured IMAGE_MODEL.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  model?: string;
+
   @ApiPropertyOptional({ minimum: 1, maximum: 8, default: 1, description: 'Number of variants (one job each, different seeds)' })
   @IsOptional()
   @IsInt()

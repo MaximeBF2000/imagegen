@@ -18,6 +18,8 @@ export interface InputImage {
 }
 
 export interface ImageGenerationRequest {
+  /** Catalog id of the model to run (one of the provider's `models`). */
+  model: string;
   prompt: string;
   /** 'auto' lets the model choose (usually: match the first reference image). */
   aspectRatio: AspectRatio | 'auto';
@@ -50,10 +52,23 @@ export interface ImageProviderCapabilities {
   seed: boolean;
 }
 
+/** One selectable image model. Each generation records the model it ran with. */
+export interface ImageModel {
+  /** Stable id, sent by clients as `model` and stored with generations. */
+  id: string;
+  label: string;
+  description?: string;
+  /** Older ids that resolve to this model (e.g. Hugging Face repo ids stored by earlier versions). */
+  aliases?: string[];
+  capabilities: ImageProviderCapabilities;
+}
+
 export interface ImageProvider {
   readonly id: string;
-  readonly model: string;
-  readonly capabilities: ImageProviderCapabilities;
+  /** Models this provider can run; the user picks one per generation. */
+  readonly models: readonly ImageModel[];
+  /** Id of the model used when a request doesn't name one. */
+  readonly defaultModel: string;
   /** Returns a human readable reason if the provider can't run (e.g. missing API key). */
   readiness(): string | null;
   generate(req: ImageGenerationRequest): Promise<ImageGenerationResult>;
@@ -84,6 +99,16 @@ export class ProviderError extends Error {
     super(message);
     this.name = 'ProviderError';
   }
+}
+
+/** Exact lookup by id or alias; undefined when the provider has no such model. */
+export function findModel(provider: ImageProvider, id: string): ImageModel | undefined {
+  return provider.models.find((m) => m.id === id || m.aliases?.includes(id));
+}
+
+/** Like findModel, but falls back to the default model (e.g. for generations made with a since-removed model). */
+export function modelOrDefault(provider: ImageProvider, id?: string | null): ImageModel {
+  return (id && findModel(provider, id)) || findModel(provider, provider.defaultModel) || provider.models[0];
 }
 
 export const IMAGE_PROVIDER = Symbol('IMAGE_PROVIDER');

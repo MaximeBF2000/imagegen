@@ -5,7 +5,7 @@ import { ArrowUp, Brush, Eraser, Eye, EyeOff, FlipHorizontal2, Sparkles, Trash, 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api, withToken } from '@/lib/api';
-import { useCreateGeneration } from '@/lib/queries';
+import { useActiveModel, useCreateGeneration } from '@/lib/queries';
 import { useUi } from '@/lib/store';
 import type { Asset } from '@/lib/types';
 import { cn, modKey } from '@/lib/utils';
@@ -38,6 +38,7 @@ export function InpaintEditor() {
 function Editor({ asset, onDone }: { asset: Asset; onDone: () => void }) {
   const closeLightbox = useUi((s) => s.closeLightbox);
   const create = useCreateGeneration();
+  const model = useActiveModel();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const history = useRef<ImageData[]>([]);
@@ -182,7 +183,7 @@ function Editor({ asset, onDone }: { asset: Asset; onDone: () => void }) {
     setSubmitting(true);
     try {
       const [mask] = await api.upload([await exportMask()], 'mask');
-      await create.mutateAsync({ prompt: prompt.trim(), inputImageIds: [asset.id], maskId: mask.id, count, aspectRatio: 'auto', enhance });
+      await create.mutateAsync({ prompt: prompt.trim(), model: model?.id, inputImageIds: [asset.id], maskId: mask.id, count, aspectRatio: 'auto', enhance });
       toast.success(`Inpainting ${count} variant${count > 1 ? 's' : ''}…`, { duration: 2000 });
       onDone();
       closeLightbox();

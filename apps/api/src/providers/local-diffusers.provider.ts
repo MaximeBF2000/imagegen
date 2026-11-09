@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
+import { LOCAL_MODELS } from './models.js';
 import {
-  ASPECT_RATIOS,
   type ImageGenerationRequest,
   type ImageGenerationResult,
   type ImageProvider,
+  modelOrDefault,
   ProviderError,
   type TextCompletionRequest,
   type TextProvider,
@@ -13,9 +14,12 @@ import {
 interface Health {
   status: 'loading' | 'ready' | 'error';
   error: string | null;
+  /** Catalog id of the loaded model (or the one being loaded). */
   model: string;
   device: string;
 }
+
+const labelOf = (id?: string) => LOCAL_MODELS.find((m) => m.id === id)?.label ?? id ?? 'the model';
 
 /**
  * Tracks the Python inference server's state (apps/inference) so readiness()
@@ -66,7 +70,7 @@ class InferenceServer {
     if (!this.reachable) {
       return `The local inference server isn't running at ${this.url}. Start everything with "pnpm dev" (or "pnpm --filter inference dev").`;
     }
-    if (this.health?.status === 'loading') return 'Loading FLUX.2 [klein] into memory… this takes a few seconds after startup.';
+    if (this.health?.status === 'loading') return `Loading ${labelOf(this.health.model)} into memory…`;
     if (this.health?.status === 'error') return `The model failed to load: ${this.health.error}`;
     return null;
   }
@@ -100,21 +104,19 @@ class InferenceServer {
 
 const toBase64 = (data: Buffer) => data.toString('base64');
 
-/** FLUX.2 [klein] running locally through Hugging Face diffusers (apps/inference/server.py). */
+/**
+ * Local models (FLUX.2 klein, Qwen-Image…) running through Hugging Face diffusers
+ * (apps/inference/server.py). The server keeps one model in memory and swaps it
+ * when a job asks for another one.
+ */
 export class LocalImageProvider implements ImageProvider {
   readonly id = 'local';
-  readonly capabilities = {
-    maxReferenceImages: 4,
-    nativeInpainting: true,
-    aspectRatios: [...ASPECT_RATIOS, 'auto'] as const,
-    seed: true,
-  };
+  readonly models = LOCAL_MODELS;
+  readonly defaultModel: string;
   private readonly server: InferenceServer;
 
-  constructor(
-    readonly model: string,
-    url: string,
-  ) {
+  constructor(defaultModel: string, url: string) {
+    this.defaultModel = modelOrDefault(this, defaultModel).id;
     this.server = InferenceServer.for(url);
   }
 
@@ -130,6 +132,7 @@ export class LocalImageProvider implements ImageProvider {
       const res = await this.server.post(
         '/generate',
         {
+          model: req.model,
           prompt: req.prompt,
           width: req.width,
           height: req.height,
@@ -144,7 +147,11 @@ export class LocalImageProvider implements ImageProvider {
       return {
         data: Buffer.from(await res.arrayBuffer()),
         mime: 'image/png',
-        meta: { durationMs: Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined, device: this.server.health?.device },
+        meta: {
+          durationMs: Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined,
+          device: this.server.health?.device,
+          loadMs: Number(res.headers.get('x-load-seconds')) * 1000 || undefined,
+        },
       };
     } finally {
       req.signal.removeEventListener('abort', onAbort);
@@ -153,13 +160,13 @@ export class LocalImageProvider implements ImageProvider {
 }
 
 /**
- * Prompt enhancer using FLUX.2 [klein]'s own text encoder (Qwen3, a full causal
- * LM) through the inference server: no extra model to download or keep in memory.
- * It is text-only, so it can't see reference images.
+ * Prompt enhancer using the loaded image model's own text encoder (Qwen3 for
+ * FLUX.2 klein, Qwen3-VL for Qwen-Image, both full causal LMs) through the
+ * inference server: no extra model to download or keep in memory. Text only.
  */
 export class LocalTextProvider implements TextProvider {
   readonly id = 'local';
-  readonly model = 'Qwen3 (FLUX.2 klein text encoder)';
+  readonly model = 'Qwen3 (the image model’s text encoder)';
   private readonly server: InferenceServer;
 
   constructor(url: string) {

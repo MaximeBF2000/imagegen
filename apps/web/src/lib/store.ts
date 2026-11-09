@@ -22,6 +22,8 @@ interface ComposerState {
   count: number;
   seed: number | null;
   autoEnhance: boolean;
+  /** Selected image model id (null = the server's default). */
+  model: string | null;
   focusToken: number;
   /** Folder new generations go into (null = no folder). */
   folderId: string | null;
@@ -38,6 +40,7 @@ interface ComposerState {
   setCount: (n: number) => void;
   setSeed: (n: number | null) => void;
   setAutoEnhance: (v: boolean) => void;
+  setModel: (id: string) => void;
   addFiles: (files: File[], max: number) => Promise<void>;
   addAsset: (asset: Asset, max: number) => boolean;
   removeReference: (key: string) => void;
@@ -57,6 +60,7 @@ export const useComposer = create<ComposerState>()(
       count: 4,
       seed: null,
       autoEnhance: false,
+      model: null,
       focusToken: 0,
       folderId: null,
       history: [],
@@ -75,6 +79,7 @@ export const useComposer = create<ComposerState>()(
       setCount: (count) => set({ count }),
       setSeed: (seed) => set({ seed }),
       setAutoEnhance: (autoEnhance) => set({ autoEnhance }),
+      setModel: (model) => set({ model }),
       focus: () => set((s) => ({ focusToken: s.focusToken + 1 })),
 
       addFiles: async (files, max) => {
@@ -138,6 +143,7 @@ export const useComposer = create<ComposerState>()(
         aspectRatio: s.aspectRatio === 'auto' ? '1:1' : s.aspectRatio,
         count: s.count,
         autoEnhance: s.autoEnhance,
+        model: s.model,
         history: s.history,
       }),
     },

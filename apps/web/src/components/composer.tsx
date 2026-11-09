@@ -20,7 +20,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { useConfig, useCreateGeneration, useFolders } from '@/lib/queries';
+import { useActiveModel, useCreateGeneration, useFolders } from '@/lib/queries';
 import { type Reference, useComposer, useUi } from '@/lib/store';
 import type { AspectRatio } from '@/lib/types';
 import { cn, modKey, ratioValue } from '@/lib/utils';
@@ -32,14 +32,14 @@ const COUNTS = [1, 2, 3, 4, 8];
 
 export function Composer() {
   const c = useComposer();
-  const { data: config } = useConfig();
+  const model = useActiveModel();
   const create = useCreateGeneration();
   const openInpaint = useUi((s) => s.openInpaint);
   const [enhancing, setEnhancing] = useState(false);
   const historyIndex = useRef(-1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const maxRefs = config?.limits.maxInputImages ?? 4;
+  const maxRefs = model?.capabilities.maxReferenceImages ?? 4;
 
   // Autosize the prompt box.
   useEffect(() => {
@@ -68,6 +68,7 @@ export function Composer() {
     create.mutate(
       {
         prompt,
+        model: model?.id,
         count: c.count,
         aspectRatio: c.aspectRatio,
         seed: c.seed ?? undefined,

@@ -2,10 +2,12 @@
   "name": "inference",
   "version": "0.1.0",
   "private": true,
-  "description": "Local FLUX.2 [klein] server (Python, diffusers). Managed with uv.",
+  "description": "Local image models server (Python, diffusers): FLUX.2 klein, Qwen-Image 2.1 Turbo. Managed with uv.",
   "scripts": {
     "dev": "uv run python server.py",
     "start": "uv run python server.py",
-    "setup": "uv sync && uv run hf download black-forest-labs/FLUX.2-klein-4B --exclude '*.jpg' --exclude 'flux-2-klein-4b.safetensors'"
+    "setup": "uv sync && pnpm run setup:flux && pnpm run setup:qwen",
+    "setup:flux": "uv run hf download black-forest-labs/FLUX.2-klein-4B --exclude '*.jpg' --exclude 'flux-2-klein-4b.safetensors'",
+    "setup:qwen": "uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import qwen_gguf; qwen_gguf.download_all()'"
   }
 }

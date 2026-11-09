@@ -21,10 +21,10 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api, withToken } from '@/lib/api';
-import { useAction, useConfig, useFolders, useImageEntries } from '@/lib/queries';
+import { useAction, useConfig, useFolders, useImageEntries, useModelLabel } from '@/lib/queries';
 import { useComposer, useUi } from '@/lib/store';
 import type { ImageEntry } from '@/lib/types';
-import { cn, copyText, formatBytes, prettyModel } from '@/lib/utils';
+import { cn, copyText, formatBytes } from '@/lib/utils';
 import { useImageActions } from './image-tile';
 import { CopyablePrompt } from './copyable-prompt';
 import { MoveToFolderItems } from './folders';
@@ -328,6 +328,7 @@ function InfoPanel({ entry }: { entry: ImageEntry }) {
   const close = useUi((s) => s.closeLightbox);
   const composer = useComposer();
   const { data: config } = useConfig();
+  const modelLabel = useModelLabel();
   const run = useAction();
 
   const { data: folders } = useFolders();
@@ -358,7 +359,7 @@ function InfoPanel({ entry }: { entry: ImageEntry }) {
         <MoveToFolderItems jobIds={[job.id]} currentFolderId={job.folderId} />
       </Menu>,
     ],
-    ['Model', prettyModel(gen.model)],
+    ['Model', modelLabel(gen.model)],
     ['Mode', gen.mode.replace(/-/g, ' ')],
     ['Created', new Date(job.finishedAt ?? gen.createdAt).toLocaleString()],
   ];

@@ -43,7 +43,8 @@ export const config = {
   image: {
     /** Which ImageProvider implementation to use: local | mock */
     provider: str('IMAGE_PROVIDER', 'local'),
-    model: str('IMAGE_MODEL', 'black-forest-labs/FLUX.2-klein-4B'),
+    /** Default model id (see providers/models.ts); each generation can pick another one. */
+    model: str('IMAGE_MODEL', 'flux2-klein-4b'),
   },
 
   text: {
