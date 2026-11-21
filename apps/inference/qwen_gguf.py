@@ -1,7 +1,16 @@
 """
-Qwen-Image 2.1 Turbo from GGUF files, loaded into diffusers' QwenImage21Pipeline.
+Qwen-Image 2.1 (Turbo or base) from GGUF files, loaded into diffusers' QwenImage21Pipeline.
 
-  - denoiser:     AtomicChat/Qwen-Image-2.1-Turbo-GGUF            (Q8_0, kept quantized, dequantized per layer)
+Two variants share everything but the denoiser and the small config files:
+
+  - turbo: 8-step distilled model (its schedule comes from the checkpoint's `sample_sigmas`)
+           denoiser AtomicChat/Qwen-Image-2.1-Turbo-GGUF, configs Qwen/Qwen-Image-2.1-Turbo
+  - base:  the original, non-distilled model (~30-40 steps): slower, but what most LoRAs are trained on
+           denoiser unsloth/Qwen-Image-2.1-GGUF, configs Qwen/Qwen-Image-2.1
+
+Shared parts:
+
+  - denoiser:     Q8_0, kept quantized, dequantized per layer
   - text encoder: AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF (Q8_0 Qwen3-VL-8B language model, abliterated)
   - vision tower: the `model.visual.*` tensors of the official encoder, needed to read reference images.
                   The GGUF repo ships them as an llama.cpp mmproj file, which transformers can't load, so
@@ -30,6 +39,11 @@ log = logging.getLogger("inference")
 BASE_REPO = "Qwen/Qwen-Image-2.1-Turbo"
 BASE_PATTERNS = ["model_index.json", "processor/*", "scheduler/*", "*/config.json", "text_encoder/generation_config.json", "vae/*"]
 TRANSFORMER = ("AtomicChat/Qwen-Image-2.1-Turbo-GGUF", "Qwen-Image-2.1-Turbo-Q8_0.gguf")
+#: variant -> (config repo, denoiser GGUF)
+VARIANTS = {
+    "turbo": (BASE_REPO, TRANSFORMER),
+    "base": ("Qwen/Qwen-Image-2.1", ("unsloth/Qwen-Image-2.1-GGUF", "qwen-image-2.1-Q8_0.gguf")),
+}
 TEXT_ENCODER = ("AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF", "Qwen-Image-2.1-Turbo-Uncensored-Q8_0.gguf")
 VISION_SOURCE = (BASE_REPO, "text_encoder/model.safetensors")
 VISION_PREFIX = "model.visual."
@@ -48,13 +62,13 @@ def _download(repo: str, filename: str) -> str:
         return hf_hub_download(repo, filename)
 
 
-def _base_snapshot() -> str:
+def _base_snapshot(repo: str = BASE_REPO) -> str:
     from huggingface_hub import snapshot_download
 
     try:
-        return snapshot_download(BASE_REPO, allow_patterns=BASE_PATTERNS, local_files_only=True)
+        return snapshot_download(repo, allow_patterns=BASE_PATTERNS, local_files_only=True)
     except Exception:
-        return snapshot_download(BASE_REPO, allow_patterns=BASE_PATTERNS)
+        return snapshot_download(repo, allow_patterns=BASE_PATTERNS)
 
 
 def _vision_path() -> Path:
@@ -127,9 +141,10 @@ def fetch_vision_tower() -> Path:
     return out
 
 
-def download_all() -> None:
-    _base_snapshot()
-    _download(*TRANSFORMER)
+def download_all(variant: str = "turbo") -> None:
+    repo, transformer = VARIANTS[variant]
+    _base_snapshot(repo)
+    _download(*transformer)
     _download(*TEXT_ENCODER)
     fetch_vision_tower()
 
@@ -217,12 +232,13 @@ def _unpack_non_linear_gguf(model: torch.nn.Module, dtype: torch.dtype) -> None:
                 setattr(module, name, torch.nn.Parameter(value, requires_grad=False))
 
 
-def load_pipeline(dtype: torch.dtype):
+def load_pipeline(dtype: torch.dtype, variant: str = "turbo"):
     from diffusers import GGUFQuantizationConfig, QwenImage21Pipeline, QwenImage21Transformer2DModel
 
-    base = _base_snapshot()
+    repo, gguf = VARIANTS[variant]
+    base = _base_snapshot(repo)
     transformer = QwenImage21Transformer2DModel.from_single_file(
-        _download(*TRANSFORMER),
+        _download(*gguf),
         quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
         config=base,
         subfolder="transformer",

@@ -19,4 +19,17 @@ export const LOCAL_MODELS: ImageModel[] = [
     description: 'Qwen-Image 2.1 Turbo (8 steps) with the uncensored Qwen3-VL text encoder, both Q8 GGUF. Strong at text rendering.',
     capabilities: { maxReferenceImages: 4, nativeInpainting: false, aspectRatios: [...ASPECT_RATIOS, 'auto'], seed: true },
   },
+  {
+    id: 'qwen-image-2.1',
+    label: 'Qwen-Image 2.1',
+    description:
+      'The original (non-Turbo) Qwen-Image 2.1, Q8 GGUF, 30 steps: ~4× slower than Turbo, but it’s what most LoRAs are trained on (some only work here).',
+    capabilities: { maxReferenceImages: 4, nativeInpainting: false, aspectRatios: [...ASPECT_RATIOS, 'auto'], seed: true },
+  },
+  {
+    id: 'flux3-klein',
+    label: 'FLUX 3 [klein]',
+    description: 'FLUX 3 Image klein (16 steps) with the uncensored Qwen3-VL-4B text encoder, both Q8 GGUF. Likes detailed captions.',
+    capabilities: { maxReferenceImages: 4, nativeInpainting: false, aspectRatios: [...ASPECT_RATIOS, 'auto'], seed: true },
+  },
 ];

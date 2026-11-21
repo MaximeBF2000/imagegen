@@ -44,7 +44,12 @@ export const config = {
     /** Which ImageProvider implementation to use: local | mock */
     provider: str('IMAGE_PROVIDER', 'local'),
     /** Default model id (see providers/models.ts); each generation can pick another one. */
-    model: str('IMAGE_MODEL', 'flux2-klein-4b'),
+    model: str('IMAGE_MODEL', 'qwen-image-2.1-turbo'),
+  },
+
+  upscale: {
+    /** Default upscaler id (see providers/upscalers.ts). */
+    upscaler: str('UPSCALER', 'seedvr2-7b-8bit'),
   },
 
   text: {

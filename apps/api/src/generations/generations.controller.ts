@@ -15,7 +15,7 @@ import {
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { concatMap, from, interval, map, merge, type Observable, of } from 'rxjs';
 import { EventsService } from './events.service.js';
-import { BulkCreateGenerationsDto, CreateGenerationDto, ListGenerationsQuery, MoveImagesDto, UpdateGenerationDto } from './generations.dto.js';
+import { BulkCreateGenerationsDto, CreateGenerationDto, CreateUpscaleDto, DeleteImagesDto, ListGenerationsQuery, MoveImagesDto, UpdateGenerationDto } from './generations.dto.js';
 import { GenerationsService } from './generations.service.js';
 import { QueueService } from './queue.service.js';
 
@@ -37,6 +37,17 @@ export class GenerationsController {
   })
   create(@Body() dto: CreateGenerationDto) {
     return this.generations.create(dto);
+  }
+
+  @Post('upscales')
+  @ApiOperation({
+    summary: 'Queue an upscale of an image',
+    description:
+      'Creates a generation (mode "upscale") with one job that upscales `imageId` by `scale` with the chosen upscaler. ' +
+      'It keeps the source prompt and shows up in the feed like any other image.',
+  })
+  upscale(@Body() dto: CreateUpscaleDto) {
+    return this.generations.createUpscale(dto);
   }
 
   @Post('generations/bulk')
@@ -72,6 +83,16 @@ export class GenerationsController {
     return this.generations.moveImages(dto.ids, dto.folderId);
   }
 
+  @Post('images/delete')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Delete images (job ids) in bulk',
+    description: 'Generations left without images are deleted too, with their prompt and mask (uploads are kept).',
+  })
+  deleteImages(@Body() dto: DeleteImagesDto) {
+    return this.generations.removeImages(dto.ids);
+  }
+
   @Get('generations/:id/wait')
   @ApiOperation({ summary: 'Long-poll until every job of the generation is finished (or timeout)' })
   @ApiQuery({ name: 'timeout', required: false, description: 'Seconds, max 300 (default 120)' })
@@ -96,7 +117,7 @@ export class GenerationsController {
 
   @Delete('generations/:id')
   @HttpCode(204)
-  @ApiOperation({ summary: 'Delete a generation and its generated images' })
+  @ApiOperation({ summary: 'Delete a generation: its prompt, images and mask (uploads are kept)' })
   async remove(@Param('id', ParseUUIDPipe) id: string) {
     await this.generations.remove(id);
   }

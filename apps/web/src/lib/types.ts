@@ -42,7 +42,11 @@ export interface Generation {
   seed: number | null;
   provider: string;
   model: string;
-  mode: 'text-to-image' | 'image-to-image' | 'inpaint';
+  mode: 'text-to-image' | 'image-to-image' | 'inpaint' | 'upscale';
+  /** Set for upscales: `model` is then the upscaler id. */
+  upscale: { upscaler: string; scale: number } | null;
+  /** LoRAs applied on top of the model. */
+  loras: LoraRef[];
   inputImages: Asset[];
   mask: Asset | null;
   label: string | null;
@@ -80,6 +84,53 @@ export interface ImageModelInfo {
   capabilities: ModelCapabilities;
 }
 
+/** A LoRA enabled for a generation, with its strength (1 = as trained). */
+export interface LoraRef {
+  id: string;
+  scale: number;
+}
+
+export interface LoraInfo {
+  id: string;
+  label: string;
+  description?: string;
+  /** Model ids this LoRA works with. */
+  models: string[];
+  /** Prepended to the prompt by the server when the LoRA is on. */
+  trigger?: string;
+  defaultScale: number;
+  source?: string;
+  /** Short how-to (recommended strength, prompt style…). */
+  usage?: string;
+  /** Prompt to start from; the picker can insert it. */
+  promptTemplate?: string;
+  /** Edit LoRA: needs a reference image. */
+  needsImage?: boolean;
+  /** Why it can't be used right now (e.g. not downloaded), or null. */
+  issue: string | null;
+}
+
+export interface UpscalerInfo {
+  id: string;
+  label: string;
+  description?: string;
+  scales: number[];
+  maxSide: number;
+  /** Why it can't run right now (not installed, server down…), or null. */
+  issue: string | null;
+}
+
+/** An uploaded image, with how many generations use it as a reference. */
+export interface Upload extends Asset {
+  usedBy: number;
+}
+
+export interface UploadPage {
+  items: Upload[];
+  total: number;
+  nextCursor: string | null;
+}
+
 export interface AppConfig {
   ready: boolean;
   issues: string[];
@@ -89,8 +140,10 @@ export interface AppConfig {
     model: string;
     capabilities: ModelCapabilities;
     models: ImageModelInfo[];
+    loras?: LoraInfo[];
   };
   text: { provider: string; model: string };
+  upscale: { provider: string; default: string; upscalers: UpscalerInfo[] };
   queue: QueueStats;
   limits: { maxVariants: number; maxInputImages: number };
   authRequired: boolean;
@@ -100,6 +153,7 @@ export interface CreateGenerationInput {
   prompt: string;
   /** Image model id; the server default when omitted. */
   model?: string;
+  loras?: LoraRef[];
   count?: number;
   aspectRatio?: AspectRatio;
   seed?: number;

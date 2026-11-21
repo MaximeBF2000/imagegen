@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
+import { LOCAL_LORAS } from './loras.js';
 import { LOCAL_MODELS } from './models.js';
+import { LOCAL_UPSCALERS } from './upscalers.js';
 import {
   type ImageGenerationRequest,
   type ImageGenerationResult,
@@ -9,6 +11,8 @@ import {
   ProviderError,
   type TextCompletionRequest,
   type TextProvider,
+  type UpscaleProvider,
+  type UpscaleRequest,
 } from './types.js';
 
 interface Health {
@@ -17,6 +21,10 @@ interface Health {
   /** Catalog id of the loaded model (or the one being loaded). */
   model: string;
   device: string;
+  /** `issue` is null when the upscaler can run. */
+  upscalers?: { id: string; issue: string | null }[];
+  /** `issue` is null when the LoRA file is there. */
+  loras?: { id: string; issue: string | null }[];
 }
 
 const labelOf = (id?: string) => LOCAL_MODELS.find((m) => m.id === id)?.label ?? id ?? 'the model';
@@ -112,6 +120,7 @@ const toBase64 = (data: Buffer) => data.toString('base64');
 export class LocalImageProvider implements ImageProvider {
   readonly id = 'local';
   readonly models = LOCAL_MODELS;
+  readonly loras = LOCAL_LORAS;
   readonly defaultModel: string;
   private readonly server: InferenceServer;
 
@@ -122,6 +131,12 @@ export class LocalImageProvider implements ImageProvider {
 
   readiness() {
     return this.server.readiness();
+  }
+
+  loraIssue(id: string) {
+    if (!this.server.reachable) return null; // unknown until the server is up; the job reports it then
+    const entry = this.server.health?.loras?.find((l) => l.id === id);
+    return entry ? entry.issue : 'The inference server doesn’t know this LoRA (restart it to pick up new ones).';
   }
 
   async generate(req: ImageGenerationRequest): Promise<ImageGenerationResult> {
@@ -139,6 +154,7 @@ export class LocalImageProvider implements ImageProvider {
           seed: req.seed,
           references: req.referenceImages.map((img) => toBase64(img.data)),
           inpaint: req.inpaint ? { image: toBase64(req.inpaint.image.data), mask: toBase64(req.inpaint.mask) } : undefined,
+          loras: req.loras ?? [],
           request_id: requestId,
         },
         req.signal,
@@ -152,6 +168,48 @@ export class LocalImageProvider implements ImageProvider {
           device: this.server.health?.device,
           loadMs: Number(res.headers.get('x-load-seconds')) * 1000 || undefined,
         },
+      };
+    } finally {
+      req.signal.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
+/**
+ * Upscalers run by the inference server (apps/inference/upscalers.py), e.g.
+ * SeedVR2 through mlx-gen. GPU work is serialized with image generations there.
+ */
+export class LocalUpscaleProvider implements UpscaleProvider {
+  readonly id = 'local';
+  readonly upscalers = LOCAL_UPSCALERS;
+  readonly defaultUpscaler: string;
+  private readonly server: InferenceServer;
+
+  constructor(defaultUpscaler: string, url: string) {
+    this.defaultUpscaler = LOCAL_UPSCALERS.find((u) => u.id === defaultUpscaler)?.id ?? LOCAL_UPSCALERS[0].id;
+    this.server = InferenceServer.for(url);
+  }
+
+  readiness(upscaler = this.defaultUpscaler) {
+    if (!this.server.reachable) return this.server.readiness();
+    return this.server.health?.upscalers?.find((u) => u.id === upscaler)?.issue ?? null;
+  }
+
+  async upscale(req: UpscaleRequest): Promise<ImageGenerationResult> {
+    const requestId = randomUUID();
+    const onAbort = () => void this.server.post(`/cancel/${requestId}`, {}).catch(() => undefined);
+    req.signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      const res = await this.server.post(
+        '/upscale',
+        { upscaler: req.upscaler, image: toBase64(req.image.data), scale: req.scale, seed: req.seed, request_id: requestId },
+        req.signal,
+      );
+      const seconds = Number(res.headers.get('x-inference-seconds'));
+      return {
+        data: Buffer.from(await res.arrayBuffer()),
+        mime: 'image/png',
+        meta: { durationMs: Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined, device: this.server.health?.device },
       };
     } finally {
       req.signal.removeEventListener('abort', onAbort);

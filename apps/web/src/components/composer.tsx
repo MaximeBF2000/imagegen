@@ -20,11 +20,12 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { useActiveModel, useCreateGeneration, useFolders } from '@/lib/queries';
+import { useActiveLoras, useActiveModel, useCreateGeneration, useFolders } from '@/lib/queries';
 import { type Reference, useComposer, useUi } from '@/lib/store';
 import type { AspectRatio } from '@/lib/types';
 import { cn, modKey, ratioValue } from '@/lib/utils';
 import { useFolderDialog } from './folders';
+import { LoraPicker } from './lora-picker';
 import { Button, IconButton, Kbd, Menu, MenuItem, MenuLabel, MenuSeparator, Pop, Spinner, Tip } from './ui/primitives';
 
 const RATIOS: AspectRatio[] = ['1:1', '4:3', '3:4', '3:2', '2:3', '16:9', '9:16', '21:9'];
@@ -33,6 +34,7 @@ const COUNTS = [1, 2, 3, 4, 8];
 export function Composer() {
   const c = useComposer();
   const model = useActiveModel();
+  const { enabled: loras, available: modelLoras } = useActiveLoras();
   const create = useCreateGeneration();
   const openInpaint = useUi((s) => s.openInpaint);
   const [enhancing, setEnhancing] = useState(false);
@@ -65,10 +67,16 @@ export function Composer() {
   const submit = () => {
     if (!canSubmit) return;
     const prompt = c.prompt.trim();
+    const editLora = modelLoras.find((l) => l.needsImage && loras.some((r) => r.id === l.id));
+    if (editLora && !readyRefs.length) {
+      toast.error(`${editLora.label} edits an image`, { description: 'Add the picture to edit as a reference (drop, paste or ＋), then generate.' });
+      return;
+    }
     create.mutate(
       {
         prompt,
         model: model?.id,
+        loras: loras.length ? loras : undefined,
         count: c.count,
         aspectRatio: c.aspectRatio,
         seed: c.seed ?? undefined,
@@ -209,6 +217,7 @@ export function Composer() {
         <CountPicker value={c.count} onChange={c.setCount} />
         <SeedPicker value={c.seed} onChange={c.setSeed} />
         <FolderPicker value={c.folderId} onChange={c.setFolderId} />
+        <LoraPicker />
 
         <div className="ml-auto flex items-center gap-1">
           {c.promptBeforeEnhance !== null && !enhancing && (

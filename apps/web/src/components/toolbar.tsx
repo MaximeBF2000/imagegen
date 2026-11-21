@@ -2,6 +2,7 @@
 
 import {
   Check,
+  CheckCheck,
   ChevronDown,
   Download,
   Folder as FolderIcon,
@@ -13,7 +14,9 @@ import {
   MoreHorizontal,
   Pencil,
   Trash2,
+  Upload,
 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useFolders } from '@/lib/queries';
 import { type Density, useUi } from '@/lib/store';
@@ -38,6 +41,10 @@ export function Toolbar() {
   const setDensity = useUi((s) => s.setDensity);
   const search = useUi((s) => s.search);
   const openDialog = useFolderDialog((s) => s.open);
+  const selectable = useUi((s) => s.selectable);
+  const allSelected = useUi((s) => s.selectable.length > 0 && s.selection.length === s.selectable.length);
+  const setSelection = useUi((s) => s.setSelection);
+  const router = useRouter();
 
   const current = data?.items.find((f) => f.id === folder);
   const title = folder === 'all' ? 'All images' : folder === 'none' ? 'Unfiled' : (current?.name ?? 'Folder');
@@ -60,6 +67,9 @@ export function Toolbar() {
         </MenuItem>
         <MenuItem icon={<Inbox />} onSelect={() => setFolder('none')}>
           Unfiled
+        </MenuItem>
+        <MenuItem icon={<Upload />} onSelect={() => router.push('/uploads')}>
+          Uploaded medias
         </MenuItem>
         {!!data?.items.length && <MenuSeparator />}
         {data?.items.map((f) => (
@@ -118,6 +128,14 @@ export function Toolbar() {
               </Tip>
             ))}
           </div>
+        )}
+        {view === 'grid' && selectable.length > 0 && (
+          <Tip label={allSelected ? 'Clear selection (Esc)' : 'Select all loaded images (⌘A)'} side="bottom">
+            <Button size="sm" variant="secondary" onClick={() => setSelection(allSelected ? [] : selectable)}>
+              <CheckCheck className="h-4 w-4" />
+              <span className="hidden sm:inline">{allSelected ? 'Deselect' : 'Select all'}</span>
+            </Button>
+          </Tip>
         )}
         <Tip label={`Download ${count ?? ''} images as .zip (with prompts & seeds)`} side="bottom">
           <Button size="sm" variant="secondary" disabled={!count} onClick={() => download(api.archiveUrl(folder))}>

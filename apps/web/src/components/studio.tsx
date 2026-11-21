@@ -14,8 +14,11 @@ import { InpaintEditor } from './inpaint-editor';
 import { Lightbox } from './lightbox';
 import { Sidebar } from './sidebar';
 import { Toolbar } from './toolbar';
+import { UploadsView } from './uploads';
 
-export function Studio() {
+export type StudioPage = 'feed' | 'uploads';
+
+export function Studio({ page = 'feed' }: { page?: StudioPage }) {
   const connected = useLiveEvents();
   const { data: config } = useConfig();
 
@@ -42,7 +45,7 @@ export function Studio() {
     <>
       <Header connected={connected} />
       <div className="mx-auto flex max-w-[1680px]">
-        <Sidebar />
+        <Sidebar page={page} />
         <main className="min-w-0 flex-1 px-4 pb-28 sm:px-6">
           {config && !config.ready && <ReadinessBanner issues={config.issues} />}
           <div className="z-20 -mx-4 bg-gradient-to-b from-bg via-bg/95 to-transparent px-4 pb-6 pt-5 sm:-mx-6 sm:px-6 lg:sticky lg:top-[60px]">
@@ -50,8 +53,14 @@ export function Studio() {
               <Composer />
             </div>
           </div>
-          <Toolbar />
-          <Feed />
+          {page === 'uploads' ? (
+            <UploadsView />
+          ) : (
+            <>
+              <Toolbar />
+              <Feed />
+            </>
+          )}
         </main>
       </div>
       <Lightbox />

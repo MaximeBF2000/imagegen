@@ -3,7 +3,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from './api';
-import type { Asset, AspectRatio, FolderScope } from './types';
+import type { Asset, AspectRatio, FolderScope, LoraRef } from './types';
 
 export interface Reference {
   key: string;
@@ -11,6 +11,8 @@ export interface Reference {
   status: 'uploading' | 'ready' | 'error';
   asset?: Asset;
   error?: string;
+  /** Uploaded from this composer (vs. an existing image reused as reference). */
+  uploaded?: boolean;
 }
 
 interface ComposerState {
@@ -24,6 +26,8 @@ interface ComposerState {
   autoEnhance: boolean;
   /** Selected image model id (null = the server's default). */
   model: string | null;
+  /** Enabled LoRAs, remembered per model id. */
+  loras: Record<string, LoraRef[]>;
   focusToken: number;
   /** Folder new generations go into (null = no folder). */
   folderId: string | null;
@@ -41,10 +45,18 @@ interface ComposerState {
   setSeed: (n: number | null) => void;
   setAutoEnhance: (v: boolean) => void;
   setModel: (id: string) => void;
+  /** Turns a LoRA on (at `defaultScale`) or off for `model`. */
+  toggleLora: (model: string, id: string, defaultScale: number) => void;
+  setLoraScale: (model: string, id: string, scale: number) => void;
+  clearLoras: (model: string) => void;
   addFiles: (files: File[], max: number) => Promise<void>;
   addAsset: (asset: Asset, max: number) => boolean;
   removeReference: (key: string) => void;
+  /** Drops references to assets that were deleted. */
+  forgetAssets: (ids: string[]) => void;
   clearReferences: () => void;
+  /** Removes a prompt from the ↑ history (its generation was deleted). */
+  forgetPrompt: (prompt: string) => void;
   focus: () => void;
 }
 
@@ -57,10 +69,11 @@ export const useComposer = create<ComposerState>()(
       promptBeforeEnhance: null,
       references: [],
       aspectRatio: '1:1',
-      count: 4,
+      count: 1,
       seed: null,
       autoEnhance: false,
       model: null,
+      loras: {},
       focusToken: 0,
       folderId: null,
       history: [],
@@ -80,6 +93,15 @@ export const useComposer = create<ComposerState>()(
       setSeed: (seed) => set({ seed }),
       setAutoEnhance: (autoEnhance) => set({ autoEnhance }),
       setModel: (model) => set({ model }),
+      toggleLora: (model, id, defaultScale) =>
+        set((s) => {
+          const current = s.loras[model] ?? [];
+          const next = current.some((l) => l.id === id) ? current.filter((l) => l.id !== id) : [...current, { id, scale: defaultScale }];
+          return { loras: { ...s.loras, [model]: next } };
+        }),
+      setLoraScale: (model, id, scale) =>
+        set((s) => ({ loras: { ...s.loras, [model]: (s.loras[model] ?? []).map((l) => (l.id === id ? { ...l, scale } : l)) } })),
+      clearLoras: (model) => set((s) => ({ loras: { ...s.loras, [model]: [] } })),
       focus: () => set((s) => ({ focusToken: s.focusToken + 1 })),
 
       addFiles: async (files, max) => {
@@ -91,6 +113,7 @@ export const useComposer = create<ComposerState>()(
           key: `ref-${++keySeq}`,
           previewUrl: URL.createObjectURL(f),
           status: 'uploading',
+          uploaded: true,
         }));
         set((s) => ({
           references: [...s.references, ...added],
@@ -101,6 +124,8 @@ export const useComposer = create<ComposerState>()(
             const key = added[i].key;
             try {
               const [asset] = await api.upload([file]);
+              // Removed while uploading (the upload stays on the Uploads page).
+              if (!get().references.some((r) => r.key === key)) return;
               set((s) => ({ references: s.references.map((r) => (r.key === key ? { ...r, status: 'ready', asset } : r)) }));
             } catch (err) {
               set((s) => ({
@@ -133,10 +158,22 @@ export const useComposer = create<ComposerState>()(
           };
         }),
       clearReferences: () => set((s) => ({ references: [], aspectRatio: s.aspectRatio === 'auto' ? '1:1' : s.aspectRatio })),
+      forgetAssets: (ids) =>
+        set((s) => {
+          const references = s.references.filter((r) => !r.asset || !ids.includes(r.asset.id));
+          if (references.length === s.references.length) return {};
+          return { references, aspectRatio: references.length === 0 && s.aspectRatio === 'auto' ? '1:1' : s.aspectRatio };
+        }),
+      forgetPrompt: (prompt) => set((s) => ({ history: s.history.filter((p) => p !== prompt) })),
     }),
     {
       name: 'imagegen-composer',
-      version: 1,
+      version: 2,
+      // v2: new defaults (1 variant, the server's default model, now Qwen-Image 2.1).
+      migrate: (persisted: any, version) => {
+        const state = persisted ?? {};
+        return version < 2 ? { ...state, count: 1, model: null, loras: state.loras ?? {} } : state;
+      },
       // Persist settings + draft, not in-flight uploads.
       partialize: (s) => ({
         prompt: s.prompt,
@@ -144,6 +181,7 @@ export const useComposer = create<ComposerState>()(
         count: s.count,
         autoEnhance: s.autoEnhance,
         model: s.model,
+        loras: s.loras,
         history: s.history,
       }),
     },
@@ -163,6 +201,8 @@ interface UiState {
   folder: FolderScope;
   /** Selected image (job) ids in the grid. */
   selection: string[];
+  /** Ids of every selectable image currently loaded in the grid (newest first). */
+  selectable: string[];
   view: ViewMode;
   density: Density;
   openLightbox: (jobId: string) => void;
@@ -174,6 +214,9 @@ interface UiState {
   setFolder: (folder: FolderScope) => void;
   toggleSelected: (jobId: string, range?: string[]) => void;
   setSelection: (ids: string[]) => void;
+  setSelectable: (ids: string[]) => void;
+  /** Adds `ids` to the selection, or removes them all when every one is already selected. */
+  toggleMany: (ids: string[]) => void;
   clearSelection: () => void;
   setView: (view: ViewMode) => void;
   setDensity: (density: Density) => void;
@@ -188,6 +231,7 @@ export const useUi = create<UiState>()(
       search: '',
       folder: 'all',
       selection: [],
+      selectable: [],
       view: 'grid',
       density: 'md',
       openLightbox: (lightboxJobId) => set({ lightboxJobId }),
@@ -207,6 +251,14 @@ export const useUi = create<UiState>()(
           return { selection: s.selection.includes(jobId) ? s.selection.filter((id) => id !== jobId) : [...s.selection, jobId] };
         }),
       setSelection: (selection) => set({ selection }),
+      setSelectable: (selectable) =>
+        // Drop selected images that disappeared (deleted, filtered out).
+        set((s) => ({ selectable, selection: s.selection.filter((id) => selectable.includes(id)) })),
+      toggleMany: (ids) =>
+        set((s) => {
+          const all = ids.every((id) => s.selection.includes(id));
+          return { selection: all ? s.selection.filter((id) => !ids.includes(id)) : [...new Set([...s.selection, ...ids])] };
+        }),
       clearSelection: () => set({ selection: [] }),
       setView: (view) => set({ view }),
       setDensity: (density) => set({ density }),

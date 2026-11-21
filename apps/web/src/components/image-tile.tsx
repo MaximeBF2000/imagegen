@@ -6,6 +6,7 @@ import {
   Brush,
   Check,
   Download,
+  ExternalLink,
   ImagePlus,
   Maximize2,
   MoreHorizontal,
@@ -24,6 +25,7 @@ import { cn, download } from '@/lib/utils';
 import { CopyablePrompt } from './copyable-prompt';
 import { DRAG_TYPE, MoveToFolderSub } from './folders';
 import { IconButton, Menu, MenuItem, MenuSeparator, Spinner } from './ui/primitives';
+import { UpscaleSub } from './upscale-menu';
 
 export function useElapsed(since: string | null, active: boolean) {
   const [now, setNow] = useState(() => Date.now());
@@ -54,12 +56,16 @@ export function useImageActions() {
     },
     inpaint: (job: Job) => job.image && openInpaint(job.image),
     download: (job: Job) => job.image && download(withToken(job.image.downloadUrl)),
+    /** Opens the full-size file in a new browser tab, outside the app. */
+    openOutside: (job: Job) => job.image && window.open(withToken(job.image.url), '_blank', 'noopener,noreferrer'),
     remix: (gen: Generation, job: Job) => {
       if (!job.image) return;
       create.mutate(
         {
           prompt: gen.prompt,
-          model: gen.model,
+          // An upscale's `model` is its upscaler: remix with the default image model.
+          model: gen.upscale ? undefined : gen.model,
+          loras: !gen.upscale && gen.loras?.length ? gen.loras : undefined,
           inputImageIds: [job.image.id],
           count: 4,
           aspectRatio: 'auto',
@@ -161,8 +167,8 @@ export const ImageTile = memo(function ImageTile({ gen, job, ratio, variant = 'l
 
         <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity duration-200 group-hover/tile:opacity-100 has-[[data-state=open]]:opacity-100">
           {density !== 'sm' && (
-            <IconButton label="Download" variant="glass" size="icon-sm" onClick={() => actions.download(job)}>
-              <Download className="h-4 w-4" />
+            <IconButton label="Use as reference" variant="glass" size="icon-sm" onClick={() => actions.useAsReference(job)}>
+              <ImagePlus className="h-4 w-4" />
             </IconButton>
           )}
           <Menu
@@ -178,6 +184,9 @@ export const ImageTile = memo(function ImageTile({ gen, job, ratio, variant = 'l
             <MenuItem icon={<Maximize2 />} onSelect={() => openLightbox(job.id)}>
               Open
             </MenuItem>
+            <MenuItem icon={<ExternalLink />} onSelect={() => actions.openOutside(job)}>
+              Open image outside app
+            </MenuItem>
             <MenuItem icon={<ImagePlus />} onSelect={() => actions.useAsReference(job)}>
               Use as reference
             </MenuItem>
@@ -187,6 +196,7 @@ export const ImageTile = memo(function ImageTile({ gen, job, ratio, variant = 'l
             <MenuItem icon={<Shuffle />} onSelect={() => actions.remix(gen, job)}>
               Remix ×4
             </MenuItem>
+            <UpscaleSub image={img} folderId={job.folderId} />
             <MenuItem icon={<Download />} onSelect={() => actions.download(job)}>
               Download
             </MenuItem>
@@ -205,9 +215,6 @@ export const ImageTile = memo(function ImageTile({ gen, job, ratio, variant = 'l
         ) : (
           !grid && (
             <div className="absolute bottom-2 left-2 flex gap-1 opacity-0 transition-opacity duration-200 group-hover/tile:opacity-100">
-              <IconButton label="Use as reference" variant="glass" size="icon-sm" onClick={() => actions.useAsReference(job)}>
-                <ImagePlus className="h-4 w-4" />
-              </IconButton>
               <IconButton label="Inpaint" variant="glass" size="icon-sm" onClick={() => actions.inpaint(job)}>
                 <Brush className="h-4 w-4" />
               </IconButton>
@@ -270,7 +277,11 @@ export const ImageTile = memo(function ImageTile({ gen, job, ratio, variant = 'l
         {running ? (
           <>
             <Spinner className="h-5 w-5 text-accent" />
-            {!compact && <div className="text-xs font-medium text-fg/90">{enhancingPrompt ? 'Enhancing prompt…' : 'Generating…'}</div>}
+            {!compact && (
+              <div className="text-xs font-medium text-fg/90">
+                {gen.upscale ? `Upscaling ×${gen.upscale.scale}…` : enhancingPrompt ? 'Enhancing prompt…' : 'Generating…'}
+              </div>
+            )}
             <div className="font-mono text-[11px] tabular-nums text-muted">
               {elapsed}s{job.attempts > 1 && !compact && ` · attempt ${job.attempts}`}
             </div>

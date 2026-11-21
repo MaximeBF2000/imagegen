@@ -7,6 +7,8 @@ import {
   type ImageProvider,
   type TextCompletionRequest,
   type TextProvider,
+  type UpscaleProvider,
+  type UpscaleRequest,
 } from './types.js';
 
 /**
@@ -27,6 +29,12 @@ export class MockImageProvider implements ImageProvider {
       label: 'Mock gradient (alt)',
       capabilities: { maxReferenceImages: 2, nativeInpainting: false, aspectRatios: [...ASPECT_RATIOS, 'auto'] as const, seed: true },
     },
+  ];
+
+  readonly loras = [
+    { id: 'mock-film', label: 'Mock film look', description: 'Pretend LoRA for the mock models.', models: ['mock-gradient'], trigger: 'mockfilm', defaultScale: 1 },
+    { id: 'mock-sketch', label: 'Mock sketch', models: ['mock-gradient', 'mock-gradient-alt'], defaultScale: 0.8 },
+    { id: 'mock-edit', label: 'Mock edit', models: ['mock-gradient'], defaultScale: 1, needsImage: true, promptTemplate: 'Edit the image' },
   ];
 
   constructor(private readonly delayMs = 2500) {}
@@ -60,7 +68,7 @@ export class MockImageProvider implements ImageProvider {
       const overlay = await sharp(Buffer.from(svg)).ensureAlpha(0.45).png().toBuffer();
       img = sharp(base).composite([{ input: overlay, blend: 'over' }]);
     }
-    return { data: await img.png().toBuffer(), mime: 'image/png', meta: { mock: true, model: req.model } };
+    return { data: await img.png().toBuffer(), mime: 'image/png', meta: { mock: true, model: req.model, prompt: req.prompt, loras: req.loras } };
   }
 }
 
@@ -76,5 +84,27 @@ export class MockTextProvider implements TextProvider {
     await sleep(600);
     const idea = req.user.replace(/^[\s\S]*?User idea:\s*/i, '').split('\n')[0].trim() || req.user.trim();
     return `${idea.charAt(0).toUpperCase()}${idea.slice(1)}, cinematic composition, soft volumetric light, rich color palette, shallow depth of field, highly detailed textures, shot on a 35mm lens`;
+  }
+}
+
+/** Plain Lanczos resize, for development and tests. */
+export class MockUpscaleProvider implements UpscaleProvider {
+  readonly id = 'mock';
+  readonly defaultUpscaler = 'mock-lanczos';
+  readonly upscalers = [{ id: 'mock-lanczos', label: 'Mock (Lanczos)', scales: [2, 4], maxSide: 8192 }];
+
+  constructor(private readonly delayMs = 1500) {}
+
+  readiness() {
+    return null;
+  }
+
+  async upscale(req: UpscaleRequest): Promise<ImageGenerationResult> {
+    await sleep(this.delayMs, undefined, { signal: req.signal });
+    const data = await sharp(req.image.data)
+      .resize(req.image.width * req.scale, req.image.height * req.scale, { kernel: 'lanczos3' })
+      .png()
+      .toBuffer();
+    return { data, mime: 'image/png', meta: { mock: true, upscaler: req.upscaler } };
   }
 }

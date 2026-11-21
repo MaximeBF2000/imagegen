@@ -12,7 +12,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from './api';
 import { useComposer } from './store';
-import type { CreateGenerationInput, FolderList, FolderScope, Generation, GenerationPage, ImageEntry, ImageModelInfo, Job, QueueStats } from './types';
+import type { CreateGenerationInput, UploadPage, FolderList, FolderScope, Generation, GenerationPage, ImageEntry, ImageModelInfo, Job, QueueStats } from './types';
 import { prettyModel } from './utils';
 
 type Feed = InfiniteData<GenerationPage, string | null>;
@@ -22,6 +22,7 @@ export const keys = {
   queue: ['queue'] as const,
   feed: (folder: FolderScope, q: string) => ['generations', folder, q] as const,
   folders: ['folders'] as const,
+  uploads: ['uploads'] as const,
 };
 
 /** Does an image belong to the given folder scope? */
@@ -52,10 +53,27 @@ export function useActiveModel(): ImageModelInfo | undefined {
   return models.find((m) => m.id === picked) ?? models.find((m) => m.id === config?.image.model) ?? models[0];
 }
 
+/** LoRAs usable with the active model, and those enabled for it (only known ones, in catalog order). */
+export function useActiveLoras() {
+  const { data: config } = useConfig();
+  const model = useActiveModel();
+  const picked = useComposer((s) => (model ? s.loras[model.id] : undefined));
+  const available = (config?.image.loras ?? []).filter((l) => model && l.models.includes(model.id));
+  const enabled = (picked ?? []).filter((r) => available.some((l) => l.id === r.id && !l.issue));
+  return { model, available, enabled };
+}
+
+/** Display name for a LoRA id stored on a generation. */
+export function useLoraLabel() {
+  const { data: config } = useConfig();
+  return (id: string) => config?.image.loras?.find((l) => l.id === id)?.label ?? id;
+}
+
 /** Display name for a model id stored on a generation. */
 export function useModelLabel() {
   const { data: config } = useConfig();
-  return (id: string) => config?.image.models.find((m) => m.id === id)?.label ?? prettyModel(id);
+  return (id: string) =>
+    config?.image.models.find((m) => m.id === id)?.label ?? config?.upscale?.upscalers.find((u) => u.id === id)?.label ?? prettyModel(id);
 }
 
 export function useQueueStats() {
@@ -115,9 +133,53 @@ export function upsertGeneration(qc: QueryClient, gen: Generation) {
 }
 
 export function removeGeneration(qc: QueryClient, id: string) {
+  forgetDeleted(qc, id);
   qc.setQueriesData<Feed>({ queryKey: ['generations'] }, (feed) =>
     feed ? { ...feed, pages: feed.pages.map((p) => ({ ...p, items: p.items.filter((g) => g.id !== id) })) } : feed,
   );
+}
+
+/**
+ * Deleting a generation erases its prompt on the server: drop it from this
+ * browser's prompt history too (uploads are kept, see the Uploads page).
+ */
+function forgetDeleted(qc: QueryClient, id: string) {
+  const loaded = qc.getQueriesData<Feed>({ queryKey: ['generations'] }).flatMap(([, feed]) => feed?.pages.flatMap((p) => p.items) ?? []);
+  const gen = loaded.find((g) => g.id === id);
+  if (!gen) return;
+  const stillUsed = loaded.some((g) => g.id !== id && g.prompt === gen.prompt);
+  if (!stillUsed) useComposer.getState().forgetPrompt(gen.prompt);
+}
+
+/** Uploaded images (Uploads page), newest first. */
+export function useUploads() {
+  return useInfiniteQuery({
+    queryKey: keys.uploads,
+    queryFn: ({ pageParam }) => api.uploads(pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: UploadPage) => last.nextCursor,
+    staleTime: 15_000,
+  });
+}
+
+/** Queues an upscale; the result streams into the feed like any generation. */
+export function useUpscale() {
+  const qc = useQueryClient();
+  const { data: config } = useConfig();
+  return (imageId: string, scale: number, opts: { upscaler?: string; folderId?: string | null } = {}) => {
+    const id = opts.upscaler ?? config?.upscale?.default;
+    const upscaler = config?.upscale?.upscalers.find((u) => u.id === id);
+    api
+      .upscale({ imageId, scale, upscaler: id, folderId: opts.folderId })
+      .then((gen) => {
+        upsertGeneration(qc, gen);
+        toast.success(`Upscaling ×${scale}${upscaler ? ` with ${upscaler.label}` : ''}`, {
+          description: upscaler?.issue ?? undefined,
+          duration: 2500,
+        });
+      })
+      .catch((err) => toast.error('Could not queue the upscale', { description: (err as Error).message }));
+  };
 }
 
 /** Live updates over Server-Sent Events; keeps the React Query cache in sync. */
@@ -147,6 +209,8 @@ export function useLiveEvents() {
       es.addEventListener('generation', (e) => {
         const gen: Generation = JSON.parse((e as MessageEvent).data);
         upsertGeneration(qc, gen);
+        // New uploads (and usage counts) may have changed.
+        if (gen.inputImages.length && gen.status === 'queued') void qc.invalidateQueries({ queryKey: keys.uploads });
         // Folder image counts change when images finish.
         if (gen.jobs.some((j) => j.status === 'succeeded')) refreshFolders();
       });

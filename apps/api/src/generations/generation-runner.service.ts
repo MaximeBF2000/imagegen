@@ -9,7 +9,12 @@ import {
   IMAGE_PROVIDER,
   type ImageProvider,
   type InputImage,
+  type LoraRef,
+  lorasFor,
   modelOrDefault,
+  withTriggers,
+  UPSCALE_PROVIDER,
+  type UpscaleProvider,
 } from '../providers/types.js';
 import { EventsService } from './events.service.js';
 
@@ -28,6 +33,7 @@ export class GenerationRunner {
     private readonly enhancer: PromptEnhancerService,
     private readonly events: EventsService,
     @Inject(IMAGE_PROVIDER) private readonly provider: ImageProvider,
+    @Inject(UPSCALE_PROVIDER) private readonly upscaler: UpscaleProvider,
   ) {}
 
   async run(job: JobRow, signal: AbortSignal): Promise<{ assetId: string; meta?: Record<string, unknown> }> {
@@ -35,6 +41,14 @@ export class GenerationRunner {
     if (!gen) throw new Error('Generation was deleted');
 
     const inputIds: string[] = JSON.parse(gen.input_ids);
+    if (gen.upscale) {
+      const { upscaler, scale } = JSON.parse(gen.upscale) as { upscaler: string; scale: number };
+      const image = await this.assets.readInput(inputIds[0]);
+      const res = await this.upscaler.upscale({ upscaler, image, scale, seed: job.seed, signal });
+      const asset = await this.assets.save(res.data, 'generated');
+      return { assetId: asset.id, meta: { ...res.meta, upscaledFrom: { width: image.width, height: image.height } } };
+    }
+    const loras: LoraRef[] = gen.loras ? JSON.parse(gen.loras) : [];
     const prompt = await this.resolvePrompt(gen, inputIds);
     const inputs: InputImage[] = [];
     for (const id of inputIds) inputs.push(await this.assets.readInput(id));
@@ -43,7 +57,10 @@ export class GenerationRunner {
     const { width, height } = dimensionsFor(ratio, inputs[0]);
     const model = modelOrDefault(this.provider, gen.model);
     const caps = model.capabilities;
-    const base = { model: model.id, aspectRatio: ratio, width, height, seed: job.seed, signal };
+    const base = { model: model.id, aspectRatio: ratio, width, height, seed: job.seed, loras, signal };
+    // LoRA trigger words go first in the prompt, as they were trained.
+    const enabled = lorasFor(this.provider, model.id).filter((l) => loras.some((r) => r.id === l.id));
+    const triggered = (text: string) => withTriggers(text, enabled);
 
     let output: Buffer;
     let meta: Record<string, unknown> | undefined;
@@ -54,7 +71,7 @@ export class GenerationRunner {
       if (caps.nativeInpainting) {
         const res = await this.provider.generate({
           ...base,
-          prompt,
+          prompt: triggered(prompt),
           referenceImages: inputs.slice(1),
           inpaint: { image: source, mask },
         });
@@ -69,10 +86,11 @@ export class GenerationRunner {
           ...base,
           aspectRatio: 'auto',
           ...dimensionsFor('auto', source),
-          prompt:
+          prompt: triggered(
             `Edit the first image. The second image is the exact same picture where the region to modify is highlighted in red. ` +
             `Inside the highlighted region only: ${prompt}. ` +
             `Everything outside the highlighted region must remain identical to the first image. The final image must not contain any red highlight.`,
+          ),
           referenceImages: [source, marked, ...inputs.slice(1)].slice(0, caps.maxReferenceImages),
         });
         output = await this.compositeThroughMask(source, res.data, mask);
@@ -81,7 +99,7 @@ export class GenerationRunner {
     } else {
       const res = await this.provider.generate({
         ...base,
-        prompt,
+        prompt: triggered(prompt),
         referenceImages: inputs.slice(0, caps.maxReferenceImages),
       });
       output = res.data;

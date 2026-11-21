@@ -2,12 +2,16 @@
   "name": "inference",
   "version": "0.1.0",
   "private": true,
-  "description": "Local image models server (Python, diffusers): FLUX.2 klein, Qwen-Image 2.1 Turbo. Managed with uv.",
+  "description": "Local image models server (Python, diffusers): FLUX.2 klein, Qwen-Image 2.1 Turbo, FLUX 3 klein. Managed with uv.",
   "scripts": {
     "dev": "uv run python server.py",
     "start": "uv run python server.py",
-    "setup": "uv sync && pnpm run setup:flux && pnpm run setup:qwen",
+    "setup": "uv sync && pnpm run setup:flux && pnpm run setup:qwen && pnpm run setup:flux3 && pnpm run setup:upscale",
+    "setup:loras": "uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import loras; loras.download_all()'",
     "setup:flux": "uv run hf download black-forest-labs/FLUX.2-klein-4B --exclude '*.jpg' --exclude 'flux-2-klein-4b.safetensors'",
-    "setup:qwen": "uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import qwen_gguf; qwen_gguf.download_all()'"
+    "setup:qwen": "uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import qwen_gguf; qwen_gguf.download_all()'",
+    "setup:flux3": "uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import flux3_gguf; flux3_gguf.download_all()'",
+    "setup:upscale": "uv tool install --python 3.13 mlx-gen --with 'pillow<12.2' && uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import upscalers; upscalers.download_all()'",
+    "setup:qwen-base": "uv run python -c 'import logging; logging.basicConfig(level=logging.INFO); import qwen_gguf; qwen_gguf.download_all(\"base\")'"
   }
 }

@@ -3,9 +3,19 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from '@nes
 import { filter, firstValueFrom, map, race, timer } from 'rxjs';
 import { type AssetDto, AssetsService } from '../assets/assets.service.js';
 import { DatabaseService, type GenerationRow, type JobRow, type JobStatus } from '../db/database.service.js';
-import { findModel, IMAGE_PROVIDER, type ImageProvider, modelOrDefault } from '../providers/types.js';
+import {
+  findModel,
+  findUpscaler,
+  IMAGE_PROVIDER,
+  type ImageProvider,
+  type LoraRef,
+  lorasFor,
+  modelOrDefault,
+  UPSCALE_PROVIDER,
+  type UpscaleProvider,
+} from '../providers/types.js';
 import { EventsService } from './events.service.js';
-import type { CreateGenerationDto, ListGenerationsQuery, UpdateGenerationDto } from './generations.dto.js';
+import type { CreateGenerationDto, CreateUpscaleDto, ListGenerationsQuery, UpdateGenerationDto } from './generations.dto.js';
 import { QueueService } from './queue.service.js';
 
 export type GenerationStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled';
@@ -35,7 +45,11 @@ export interface GenerationDto {
   seed: number | null;
   provider: string;
   model: string;
-  mode: 'text-to-image' | 'image-to-image' | 'inpaint';
+  mode: 'text-to-image' | 'image-to-image' | 'inpaint' | 'upscale';
+  /** Set for upscales (mode "upscale"): `model` is then the upscaler id. */
+  upscale: { upscaler: string; scale: number } | null;
+  /** LoRAs applied on top of the model. */
+  loras: LoraRef[];
   inputImages: AssetDto[];
   mask: AssetDto | null;
   label: string | null;
@@ -58,7 +72,51 @@ export class GenerationsService {
     private readonly queue: QueueService,
     private readonly events: EventsService,
     @Inject(IMAGE_PROVIDER) private readonly provider: ImageProvider,
+    @Inject(UPSCALE_PROVIDER) private readonly upscalers: UpscaleProvider,
   ) {}
+
+  /** Queues an upscale: a generation with a single job, the source image as input. */
+  createUpscale(dto: CreateUpscaleDto): GenerationDto {
+    const source = this.assets.find(dto.imageId);
+    if (!source || source.kind === 'mask') throw new BadRequestException(`Unknown image id: ${dto.imageId}`);
+    const upscaler = findUpscaler(this.upscalers, dto.upscaler);
+    if (!upscaler) {
+      throw new BadRequestException(`Unknown upscaler "${dto.upscaler}". Available: ${this.upscalers.upscalers.map((u) => u.id).join(', ')}`);
+    }
+    const scale = dto.scale ?? upscaler.scales[0];
+    if (!upscaler.scales.includes(scale)) throw new BadRequestException(`${upscaler.label} supports ×${upscaler.scales.join(', ×')}`);
+    if (Math.max(source.width, source.height) * scale > upscaler.maxSide) {
+      throw new BadRequestException(`The result would exceed ${upscaler.maxSide}px; pick a smaller factor`);
+    }
+    if (dto.folderId) this.assertFolder(dto.folderId);
+
+    // Keep the source image's prompt (and folder) so the result reads like its sibling.
+    const origin = this.db.get<{ prompt: string; enhanced_prompt: string | null; label: string | null; folder_id: string | null }>(
+      `SELECT g.prompt, g.enhanced_prompt, g.label, j.folder_id FROM jobs j JOIN generations g ON g.id = j.generation_id WHERE j.asset_id = ?`,
+      source.id,
+    );
+    const folderId = dto.folderId !== undefined ? dto.folderId : (origin?.folder_id ?? null);
+    const now = Date.now();
+    const genId = randomUUID();
+    const jobId = randomUUID();
+    const seed = dto.seed ?? randomInt(0, 2_000_000_000);
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO generations (id, prompt, enhanced_prompt, enhance, aspect_ratio, count, seed, provider, model, input_ids, mask_id, label, metadata, folder_id, upscale, created_at)
+         VALUES (?, ?, ?, 0, 'auto', 1, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)`,
+        genId, origin?.prompt ?? 'Upscaled image', origin?.enhanced_prompt ?? null, dto.seed ?? null, this.upscalers.id, upscaler.id,
+        JSON.stringify([source.id]), origin?.label ?? null, folderId, JSON.stringify({ upscaler: upscaler.id, scale }), now,
+      );
+      this.db.run(
+        `INSERT INTO jobs (id, generation_id, idx, status, seed, folder_id, created_at) VALUES (?, ?, 0, 'queued', ?, ?, ?)`,
+        jobId, genId, seed, folderId, now,
+      );
+    });
+    this.queue.enqueue([jobId]);
+    this.events.generationChanged(genId);
+    if (folderId) this.events.foldersChanged();
+    return this.get(genId);
+  }
 
   async create(dto: CreateGenerationDto): Promise<GenerationDto> {
     const inputIds = [...(dto.inputImageIds ?? [])];
@@ -82,6 +140,8 @@ export class GenerationsService {
       throw new BadRequestException(`${model.label} accepts at most ${maxRefs} input image(s)${maskId ? ' when inpainting' : ''}`);
     }
 
+    const loras = this.resolveLoras(dto.loras ?? [], model.id, model.label, inputIds.length > 0);
+
     const count = dto.count ?? 1;
     const now = Date.now();
     const gen: GenerationRow = {
@@ -99,6 +159,8 @@ export class GenerationsService {
       label: dto.label?.trim() || null,
       metadata: dto.metadata ? JSON.stringify(dto.metadata) : null,
       folder_id: dto.folderId ?? null,
+      upscale: null,
+      loras: loras.length ? JSON.stringify(loras) : null,
       created_at: now,
     };
     const baseSeed = dto.seed ?? randomInt(0, 2_000_000_000);
@@ -106,10 +168,10 @@ export class GenerationsService {
 
     this.db.transaction(() => {
       this.db.run(
-        `INSERT INTO generations (id, prompt, enhanced_prompt, enhance, aspect_ratio, count, seed, provider, model, input_ids, mask_id, label, metadata, folder_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO generations (id, prompt, enhanced_prompt, enhance, aspect_ratio, count, seed, provider, model, input_ids, mask_id, label, metadata, folder_id, loras, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         gen.id, gen.prompt, null, gen.enhance, gen.aspect_ratio, gen.count, gen.seed, gen.provider, gen.model,
-        gen.input_ids, gen.mask_id, gen.label, gen.metadata, gen.folder_id, gen.created_at,
+        gen.input_ids, gen.mask_id, gen.label, gen.metadata, gen.folder_id, gen.loras, gen.created_at,
       );
       for (let i = 0; i < count; i++) {
         const id = randomUUID();
@@ -127,6 +189,29 @@ export class GenerationsService {
     this.events.generationChanged(gen.id);
     if (gen.folder_id) this.events.foldersChanged();
     return this.get(gen.id);
+  }
+
+  /** Validates requested LoRAs against the model → LoRA mapping and fills in default strengths. */
+  private resolveLoras(requested: { id: string; scale?: number }[], modelId: string, modelLabel: string, hasImage: boolean): LoraRef[] {
+    const available = lorasFor(this.provider, modelId);
+    const out: LoraRef[] = [];
+    for (const { id, scale } of requested) {
+      if (out.some((l) => l.id === id)) continue;
+      const lora = available.find((l) => l.id === id);
+      if (!lora) {
+        const known = (this.provider.loras ?? []).some((l) => l.id === id);
+        throw new BadRequestException(
+          known
+            ? `LoRA "${id}" doesn't support ${modelLabel}`
+            : `Unknown LoRA "${id}". Available for ${modelLabel}: ${available.map((l) => l.id).join(', ') || 'none'}`,
+        );
+      }
+      if (lora.needsImage && !hasImage) throw new BadRequestException(`${lora.label} edits an image: add one as a reference (inputImageIds)`);
+      const issue = this.provider.loraIssue?.(id);
+      if (issue) throw new BadRequestException(`${lora.label}: ${issue}`);
+      out.push({ id, scale: scale ?? lora.defaultScale });
+    }
+    return out;
   }
 
   update(id: string, dto: UpdateGenerationDto): GenerationDto {
@@ -245,33 +330,63 @@ export class GenerationsService {
     return this.get(id);
   }
 
+  /** Deletes a generation: its prompt, images and mask. Uploaded inputs are kept (Uploads page). */
   async remove(id: string) {
     const gen = this.db.get<GenerationRow>('SELECT * FROM generations WHERE id = ?', id);
     if (!gen) throw new NotFoundException(`Generation ${id} not found`);
     const jobs = this.db.all<JobRow>('SELECT * FROM jobs WHERE generation_id = ?', id);
     for (const job of jobs) this.queue.cancel(job.id);
-    this.db.run('DELETE FROM jobs WHERE generation_id = ?', id);
-    this.db.run('DELETE FROM generations WHERE id = ?', id);
-    // Generated images belong to the generation; uploads may be reused so they stay.
-    await this.assets.remove(jobs.map((j) => j.asset_id).filter((a): a is string => !!a));
+    this.db.transaction(() => {
+      this.db.run('DELETE FROM jobs WHERE generation_id = ?', id);
+      this.db.run('DELETE FROM generations WHERE id = ?', id);
+    });
+    await this.assets.removeUnused([...jobs.map((j) => j.asset_id), gen.mask_id].filter((a): a is string => !!a));
+    this.db.flush();
     this.events.generationDeleted(id);
     if (jobs.some((j) => j.folder_id)) this.events.foldersChanged();
   }
 
+  /**
+   * Deletes images (jobs). A generation left without images is deleted too,
+   * together with its prompt and mask (uploaded inputs are kept).
+   */
+  async removeImages(jobIds: string[]) {
+    const jobs = [...new Set(jobIds)]
+      .map((id) => this.db.get<JobRow>('SELECT * FROM jobs WHERE id = ?', id))
+      .filter((j): j is JobRow => !!j);
+    if (!jobs.length) return { deleted: 0 };
+    for (const job of jobs) this.queue.cancel(job.id);
+
+    const candidates = jobs.map((j) => j.asset_id).filter((a): a is string => !!a);
+    const deletedGens: string[] = [];
+    const changedGens: string[] = [];
+    this.db.transaction(() => {
+      for (const job of jobs) this.db.run('DELETE FROM jobs WHERE id = ?', job.id);
+      for (const genId of new Set(jobs.map((j) => j.generation_id))) {
+        const left = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM jobs WHERE generation_id = ?', genId)!.n;
+        if (left) {
+          changedGens.push(genId);
+          continue;
+        }
+        const gen = this.db.get<GenerationRow>('SELECT * FROM generations WHERE id = ?', genId);
+        if (gen?.mask_id) candidates.push(gen.mask_id);
+        this.db.run('DELETE FROM generations WHERE id = ?', genId);
+        deletedGens.push(genId);
+      }
+    });
+    await this.assets.removeUnused(candidates);
+    this.db.flush();
+
+    for (const id of deletedGens) this.events.generationDeleted(id);
+    for (const id of changedGens) this.events.generationChanged(id);
+    if (jobs.some((j) => j.folder_id)) this.events.foldersChanged();
+    return { deleted: jobs.length };
+  }
+
   /** Delete a single generated image (the job is removed from its generation). */
   async removeJob(jobId: string) {
-    const job = this.getJob(jobId);
-    this.queue.cancel(jobId);
-    this.db.run('DELETE FROM jobs WHERE id = ?', jobId);
-    if (job.asset_id) await this.assets.remove([job.asset_id]);
-    if (job.folder_id) this.events.foldersChanged();
-    const left = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM jobs WHERE generation_id = ?', job.generation_id)!.n;
-    if (left === 0) {
-      this.db.run('DELETE FROM generations WHERE id = ?', job.generation_id);
-      this.events.generationDeleted(job.generation_id);
-    } else {
-      this.events.generationChanged(job.generation_id);
-    }
+    this.getJob(jobId);
+    await this.removeImages([jobId]);
   }
 
   getJob(jobId: string): JobRow {
@@ -345,7 +460,9 @@ export class GenerationsService {
         seed: r.seed,
         provider: r.provider,
         model: r.model,
-        mode: r.mask_id ? 'inpaint' : inputImages.length ? 'image-to-image' : 'text-to-image',
+        mode: r.upscale ? 'upscale' : r.mask_id ? 'inpaint' : inputImages.length ? 'image-to-image' : 'text-to-image',
+        upscale: r.upscale ? JSON.parse(r.upscale) : null,
+        loras: r.loras ? JSON.parse(r.loras) : [],
         inputImages,
         mask: asset(r.mask_id),
         label: r.label,

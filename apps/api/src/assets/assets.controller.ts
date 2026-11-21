@@ -1,8 +1,11 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Post,
@@ -13,7 +16,8 @@ import {
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { ApiBody, ApiConsumes, ApiOperation, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
 import type { Response } from 'express';
 import { slugify } from '../common/zip.js';
 import { DatabaseService } from '../db/database.service.js';
@@ -29,6 +33,30 @@ class CreateAssetJsonDto {
   @IsOptional()
   @IsIn(['upload', 'mask'])
   kind?: 'upload' | 'mask';
+}
+
+class ListUploadsQuery {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  cursor?: string;
+
+  @ApiPropertyOptional({ default: 60, maximum: 200 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+}
+
+class DeleteAssetsDto {
+  @ApiProperty({ type: [String], description: 'Upload asset ids' })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(2000)
+  @IsUUID('all', { each: true })
+  ids: string[];
 }
 
 @ApiTags('assets')
@@ -66,6 +94,31 @@ export class AssetsController {
     }
     if (body?.data) return [this.assets.toDto(await this.assets.saveFromString(body.data, kind))];
     throw new BadRequestException('Send multipart `files` or a JSON `data` field');
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'List uploaded images, newest first (cursor pagination), with how many generations use each' })
+  list(@Query() query: ListUploadsQuery) {
+    return this.assets.listUploads(query.cursor, query.limit);
+  }
+
+  @Post('delete')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Delete uploaded images in bulk',
+    description: 'Only uploads are deleted (other ids are ignored). Generations that used them as references keep their images but lose that input.',
+  })
+  async removeMany(@Body() dto: DeleteAssetsDto) {
+    const deleted = await this.assets.deleteUploads(dto.ids);
+    return { deleted: deleted.length, ids: deleted };
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  @ApiOperation({ summary: 'Delete an uploaded image' })
+  async remove(@Param('id', ParseUUIDPipe) id: string) {
+    if (this.assets.get(id).kind !== 'upload') throw new ConflictException('Only uploads can be deleted here; delete generated images through their generation');
+    await this.assets.deleteUploads([id]);
   }
 
   @Get(':id')

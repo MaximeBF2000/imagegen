@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { AssetsService } from '../assets/assets.service.js';
 import { config } from '../config.js';
 import { DatabaseService, type JobRow } from '../db/database.service.js';
 import { IMAGE_PROVIDER, type ImageProvider, ProviderError } from '../providers/types.js';
@@ -21,6 +22,7 @@ export class QueueService implements OnApplicationBootstrap, OnApplicationShutdo
   constructor(
     private readonly db: DatabaseService,
     private readonly runner: GenerationRunner,
+    private readonly assets: AssetsService,
     private readonly events: EventsService,
     @Inject(IMAGE_PROVIDER) private readonly provider: ImageProvider,
   ) {}
@@ -107,14 +109,19 @@ export class QueueService implements OnApplicationBootstrap, OnApplicationShutdo
 
     try {
       const { assetId, meta } = await this.runner.run({ ...job, attempts }, ctrl.signal);
-      if (ctrl.signal.aborted) throw ctrl.signal.reason;
-      this.db.run(
+      if (ctrl.signal.aborted) {
+        await this.assets.removeUnused([assetId]);
+        throw ctrl.signal.reason;
+      }
+      const { changes } = this.db.run(
         `UPDATE jobs SET status = 'succeeded', asset_id = ?, meta = ?, error = NULL, finished_at = ? WHERE id = ? AND status = 'running'`,
         assetId,
         meta ? JSON.stringify(meta) : null,
         Date.now(),
         jobId,
       );
+      // Deleted or canceled while the image was being made: don't keep it.
+      if (!changes) await this.assets.removeUnused([assetId]);
     } catch (err) {
       const current = this.db.get<JobRow>('SELECT status FROM jobs WHERE id = ?', jobId);
       if (ctrl.signal.aborted || !current || current.status !== 'running') {

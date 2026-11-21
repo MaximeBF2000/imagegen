@@ -69,11 +69,12 @@ export class FoldersService {
     this.get(id);
     const jobs = this.db.all<{ id: string; generation_id: string }>('SELECT id, generation_id FROM jobs WHERE folder_id = ?', id);
     if (deleteImages) {
-      for (const job of jobs) await this.generations.removeJob(job.id);
+      await this.generations.removeImages(jobs.map((j) => j.id));
     }
     this.db.run('UPDATE jobs SET folder_id = NULL WHERE folder_id = ?', id);
     this.db.run('UPDATE generations SET folder_id = NULL WHERE folder_id = ?', id);
     this.db.run('DELETE FROM folders WHERE id = ?', id);
+    this.db.flush();
     if (!deleteImages) {
       for (const g of new Set(jobs.map((j) => j.generation_id))) this.events.generationChanged(g);
     }

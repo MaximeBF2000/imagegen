@@ -1,10 +1,10 @@
 'use client';
 
-import { Ban, Brush, ChevronDown, Copy, CornerUpLeft, ImageIcon, MoreHorizontal, RotateCcw, Sparkles, Trash2, Type } from 'lucide-react';
+import { Ban, Brush, ChevronDown, Copy, CornerUpLeft, ImageIcon, ImageUpscale, Layers, MoreHorizontal, RotateCcw, Sparkles, Trash2, Type } from 'lucide-react';
 import { memo, useState } from 'react';
 import { toast } from 'sonner';
 import { api, withToken } from '@/lib/api';
-import { useAction, useConfig, useCreateGeneration, useDeleteGeneration, useModelLabel, visibleJobs } from '@/lib/queries';
+import { useAction, useConfig, useCreateGeneration, useDeleteGeneration, useLoraLabel, useModelLabel, useUpscale, visibleJobs } from '@/lib/queries';
 import { useComposer, useUi } from '@/lib/store';
 import type { Generation } from '@/lib/types';
 import { cn, copyText, ratioOf, timeAgo } from '@/lib/utils';
@@ -17,6 +17,7 @@ const MODE_META = {
   'text-to-image': { icon: Type, label: 'Text to image' },
   'image-to-image': { icon: ImageIcon, label: 'Image to image' },
   inpaint: { icon: Brush, label: 'Inpaint' },
+  upscale: { icon: ImageUpscale, label: 'Upscale' },
 } as const;
 
 export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Generation }) {
@@ -24,10 +25,12 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
   const [expanded, setExpanded] = useState(false);
   const { data: config } = useConfig();
   const modelLabel = useModelLabel();
+  const loraLabel = useLoraLabel();
   const composer = useComposer();
   const create = useCreateGeneration();
   const remove = useDeleteGeneration();
   const run = useAction();
+  const upscale = useUpscale();
   const folder = useUi((s) => s.folder);
   const jobs = visibleJobs(gen, folder);
 
@@ -50,20 +53,29 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
     composer.focus();
   };
 
-  const rerun = () =>
+  const targetFolder = folder !== 'all' && folder !== 'none' ? folder : (gen.folderId ?? undefined);
+  const rerun = () => {
+    if (gen.upscale) {
+      const source = gen.inputImages[0];
+      if (source) upscale(source.id, gen.upscale.scale, { upscaler: gen.upscale.upscaler, folderId: targetFolder });
+      else toast.error('The source image of this upscale was deleted');
+      return;
+    }
     create.mutate(
       {
         prompt: gen.prompt,
         model: gen.model,
+        loras: gen.loras?.length ? gen.loras : undefined,
         count: gen.count,
         aspectRatio: gen.aspectRatio,
         inputImageIds: gen.inputImages.map((a) => a.id),
         maskId: gen.mask?.id,
         enhance: gen.enhance,
-        folderId: folder !== 'all' && folder !== 'none' ? folder : (gen.folderId ?? undefined),
+        folderId: targetFolder,
       },
       { onSuccess: () => toast.success('Queued again with new seeds', { duration: 1800 }) },
     );
+  };
 
   return (
     <article className="group/card animate-fade-in">
@@ -84,6 +96,7 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-subtle">
             <span className="flex items-center gap-1">
               <mode.icon className="h-3.5 w-3.5" /> {mode.label}
+              {gen.upscale && ` ×${gen.upscale.scale}`}
             </span>
             <span className="tabular-nums">{gen.aspectRatio === 'auto' ? 'Auto ratio' : gen.aspectRatio}</span>
             <span className="tabular-nums">
@@ -91,6 +104,12 @@ export const GenerationCard = memo(function GenerationCard({ gen }: { gen: Gener
               {jobs.length < gen.jobs.length && <span className="text-subtle"> (+{gen.jobs.length - jobs.length} elsewhere)</span>}
             </span>
             <span>{modelLabel(gen.model)}</span>
+            {gen.loras?.map((l) => (
+              <span key={l.id} className="flex items-center gap-1 text-accent/80" title={`LoRA, strength ${l.scale}`}>
+                <Layers className="h-3 w-3" /> {loraLabel(l.id)}
+                {l.scale !== 1 && <span className="tabular-nums text-subtle">×{l.scale}</span>}
+              </span>
+            ))}
             {gen.label && <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted">{gen.label}</span>}
             <time dateTime={gen.createdAt} title={new Date(gen.createdAt).toLocaleString()}>
               {timeAgo(gen.createdAt)}

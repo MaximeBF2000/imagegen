@@ -8,6 +8,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsObject,
   IsOptional,
   IsString,
@@ -22,6 +23,20 @@ import { ASPECT_RATIOS } from '../providers/types.js';
 
 export const ASPECT_OPTIONS = [...ASPECT_RATIOS, 'auto'] as const;
 
+export class LoraInputDto {
+  @ApiProperty({ example: 'candid-amateur-iphone-qwen21', description: 'LoRA id (GET /api/config → image.loras), must support the chosen model' })
+  @IsString()
+  @MaxLength(200)
+  id: string;
+
+  @ApiPropertyOptional({ minimum: -2, maximum: 2, description: 'Strength (1 = as trained). Defaults to the LoRA\'s defaultScale.' })
+  @IsOptional()
+  @IsNumber()
+  @Min(-2)
+  @Max(2)
+  scale?: number;
+}
+
 export class CreateGenerationDto {
   @ApiProperty({ example: 'A cozy wooden cabin in a snowy forest at dusk, warm light in the windows' })
   @IsString()
@@ -34,6 +49,17 @@ export class CreateGenerationDto {
   @IsString()
   @MaxLength(200)
   model?: string;
+
+  @ApiPropertyOptional({
+    type: [LoraInputDto],
+    description: 'LoRAs to apply. Their trigger words are prepended to the prompt at generation time when missing.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(4)
+  @ValidateNested({ each: true })
+  @Type(() => LoraInputDto)
+  loras?: LoraInputDto[];
 
   @ApiPropertyOptional({ minimum: 1, maximum: 8, default: 1, description: 'Number of variants (one job each, different seeds)' })
   @IsOptional()
@@ -130,6 +156,45 @@ export class MoveImagesDto {
   @ValidateIf((_, v) => v !== null)
   @IsUUID()
   folderId: string | null;
+}
+
+export class CreateUpscaleDto {
+  @ApiProperty({ description: 'Asset id of the image to upscale (generation.jobs[].image.id, or an upload)' })
+  @IsUUID()
+  imageId: string;
+
+  @ApiPropertyOptional({ description: 'Scale factor; must be one of the upscaler\'s `scales` (GET /api/config → upscale)', default: 2 })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(8)
+  scale?: number;
+
+  @ApiPropertyOptional({ description: 'Upscaler id (default: UPSCALER)' })
+  @IsOptional()
+  @IsString()
+  upscaler?: string;
+
+  @ApiPropertyOptional({ description: 'Folder for the result (default: the source image\'s folder)', nullable: true })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  folderId?: string | null;
+
+  @ApiPropertyOptional({ description: 'Seed (random when omitted)' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  seed?: number;
+}
+
+export class DeleteImagesDto {
+  @ApiProperty({ type: [String], description: 'Image (job) ids, as found in generation.jobs[].id' })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(2000)
+  @IsUUID('all', { each: true })
+  ids: string[];
 }
 
 export class BulkCreateGenerationsDto {

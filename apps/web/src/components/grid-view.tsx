@@ -1,18 +1,19 @@
 'use client';
 
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Download, FolderInput, Trash2, X } from 'lucide-react';
+import { CheckCheck, Download, FolderInput, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { visibleJobs } from '@/lib/queries';
 import { useUi } from '@/lib/store';
+import { cn } from '@/lib/utils';
 import type { Generation, Job } from '@/lib/types';
 import { Button, Spinner } from './ui/primitives';
 import { MoveToFolderItems } from './folders';
 import { ImageTile } from './image-tile';
 
-const MIN_TILE = { sm: 130, md: 200, lg: 300 } as const;
+export const MIN_TILE = { sm: 130, md: 200, lg: 300 } as const;
 
 export interface DayGroup {
   label: string;
@@ -34,10 +35,19 @@ export function GridView({ groups }: { groups: DayGroup[] }) {
       })),
     [groups, folder],
   );
-  const selectable = useMemo(
-    () => sections.flatMap((s) => s.tiles.filter((t) => t.job.status === 'succeeded').map((t) => t.job.id)),
+  const selectableBySection = useMemo(
+    () => sections.map((s) => s.tiles.filter((t) => t.job.status === 'succeeded').map((t) => t.job.id)),
     [sections],
   );
+  const selectable = useMemo(() => selectableBySection.flat(), [selectableBySection]);
+  const selection = useUi((s) => s.selection);
+  const toggleMany = useUi((s) => s.toggleMany);
+
+  // Shared with the toolbar / selection bar ("Select all").
+  useEffect(() => {
+    useUi.getState().setSelectable(selectable);
+  }, [selectable]);
+  useEffect(() => () => useUi.getState().setSelectable([]), []);
 
   const onSelect = useCallback(
     (jobId: string, shift: boolean) => {
@@ -70,10 +80,28 @@ export function GridView({ groups }: { groups: DayGroup[] }) {
 
   return (
     <div className="space-y-8">
-      {sections.map((section) =>
-        section.tiles.length ? (
-          <section key={section.label}>
-            <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-subtle">{section.label}</h2>
+      {sections.map((section, i) => {
+        if (!section.tiles.length) return null;
+        const ids = selectableBySection[i];
+        const picked = ids.filter((id) => selection.includes(id)).length;
+        const all = ids.length > 0 && picked === ids.length;
+        return (
+          <section key={section.label} className="group/day">
+            <div className="mb-3 flex items-center gap-2">
+              <h2 className="text-xs font-medium uppercase tracking-wider text-subtle">{section.label}</h2>
+              {ids.length > 0 && (
+                <button
+                  onClick={() => toggleMany(ids)}
+                  className={cn(
+                    'flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-subtle transition-opacity hover:bg-white/5 hover:text-fg focus-visible:opacity-100',
+                    selection.length ? 'opacity-100' : 'opacity-0 group-hover/day:opacity-100 [@media(hover:none)]:opacity-100',
+                  )}
+                >
+                  <CheckCheck className="h-3.5 w-3.5" />
+                  {all ? 'Deselect day' : picked ? `Select all ${ids.length}` : 'Select day'}
+                </button>
+              )}
+            </div>
             <div className="grid gap-1.5 sm:gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(${MIN_TILE[density]}px, 45%), 1fr))` }}>
               {section.tiles.map(({ gen, job }) => (
                 <div key={job.id} className="animate-fade-in">
@@ -82,8 +110,8 @@ export function GridView({ groups }: { groups: DayGroup[] }) {
               ))}
             </div>
           </section>
-        ) : null,
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -91,6 +119,8 @@ export function GridView({ groups }: { groups: DayGroup[] }) {
 /** Floating action bar shown while images are selected. */
 export function SelectionBar({ jobs }: { jobs: Map<string, Job> }) {
   const selection = useUi((s) => s.selection);
+  const selectable = useUi((s) => s.selectable);
+  const setSelection = useUi((s) => s.setSelection);
   const clear = useUi((s) => s.clearSelection);
   const [busy, setBusy] = useState<'download' | 'delete' | null>(null);
   const n = selection.length;
@@ -114,13 +144,17 @@ export function SelectionBar({ jobs }: { jobs: Map<string, Job> }) {
   };
 
   const remove = async () => {
+    if (n > 1 && !window.confirm(`Delete ${n} images? Their prompts are erased too (uploads are kept). This can't be undone.`)) return;
     setBusy('delete');
-    const results = await Promise.allSettled(selection.map((id) => api.deleteJob(id)));
-    const failed = results.filter((r) => r.status === 'rejected').length;
-    setBusy(null);
-    clear();
-    if (failed) toast.error(`${failed} image(s) could not be deleted`);
-    else toast.success(`${n} image${n > 1 ? 's' : ''} deleted`);
+    try {
+      const { deleted } = await api.deleteImages(selection);
+      clear();
+      toast.success(`${deleted} image${deleted === 1 ? '' : 's'} deleted`);
+    } catch (err) {
+      toast.error('Delete failed', { description: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
   };
 
   const sameFolder = new Set(selection.map((id) => jobs.get(id)?.folderId ?? null));
@@ -132,6 +166,11 @@ export function SelectionBar({ jobs }: { jobs: Map<string, Job> }) {
         <span className="mr-2 text-sm font-medium tabular-nums">
           {n} selected
         </span>
+        {n < selectable.length && (
+          <Button size="sm" variant="ghost" className="text-fg" onClick={() => setSelection(selectable)} title="Select all loaded images (⌘A)">
+            <CheckCheck className="h-4 w-4" /> <span className="hidden sm:inline">All {selectable.length}</span>
+          </Button>
+        )}
         <DropdownMenu.Root modal={false}>
           <DropdownMenu.Trigger asChild>
             <Button size="sm" variant="ghost" className="text-fg">

@@ -1,4 +1,4 @@
-import type { AppConfig, Asset, CreateGenerationInput, Folder, FolderList, FolderScope, Generation, GenerationPage, QueueStats } from './types';
+import type { AppConfig, Asset, UploadPage, CreateGenerationInput, Folder, FolderList, FolderScope, Generation, GenerationPage, QueueStats } from './types';
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4310').replace(/\/$/, '');
 const TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || '';
@@ -54,6 +54,8 @@ export const api = {
   retryJob: (id: string) => request<Generation>(`/jobs/${id}/retry`, { method: 'POST' }),
   cancelJob: (id: string) => request<Generation>(`/jobs/${id}/cancel`, { method: 'POST' }),
   deleteJob: (id: string) => request<void>(`/jobs/${id}`, { method: 'DELETE' }),
+  /** Deletes images (job ids); generations left empty go too, with their prompt (uploads are kept). */
+  deleteImages: (ids: string[]) => request<{ deleted: number }>('/images/delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   enhancePrompt: (prompt: string, imageIds: string[] = [], mode?: 'generate' | 'edit' | 'inpaint') =>
     request<{ prompt: string }>('/prompts/enhance', { method: 'POST', body: JSON.stringify({ prompt, imageIds, mode }) }),
   upload: async (files: Blob[], kind: 'upload' | 'mask' = 'upload') => {
@@ -62,6 +64,15 @@ export const api = {
     form.append('kind', kind);
     return request<Asset[]>('/assets', { method: 'POST', body: form });
   },
+  asset: (id: string) => request<Asset>(`/assets/${id}`),
+  /** Uploaded images, newest first. */
+  uploads: (cursor?: string | null, limit = 60) =>
+    request<UploadPage>(`/assets?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
+  /** Deletes uploads, even ones generations used as references. */
+  deleteUploads: (ids: string[]) => request<{ deleted: number; ids: string[] }>('/assets/delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  /** Queues an upscale of an image (asset id); it appears in the feed as its own generation. */
+  upscale: (input: { imageId: string; scale: number; upscaler?: string; folderId?: string | null }) =>
+    request<Generation>('/upscales', { method: 'POST', body: JSON.stringify(input) }),
   eventsUrl: () => withToken(`${API_URL}/api/events`),
 
   folders: () => request<FolderList>('/folders'),

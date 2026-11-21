@@ -2,6 +2,8 @@
 
 import * as Dialog from '@radix-ui/react-dialog';
 import {
+  ExternalLink,
+  ImageUpscale,
   Brush,
   ChevronLeft,
   ChevronRight,
@@ -21,7 +23,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { api, withToken } from '@/lib/api';
-import { useAction, useConfig, useFolders, useImageEntries, useModelLabel } from '@/lib/queries';
+import { useAction, useConfig, useFolders, useImageEntries, useLoraLabel, useModelLabel, useUpscale } from '@/lib/queries';
 import { useComposer, useUi } from '@/lib/store';
 import type { ImageEntry } from '@/lib/types';
 import { cn, copyText, formatBytes } from '@/lib/utils';
@@ -329,6 +331,9 @@ function InfoPanel({ entry }: { entry: ImageEntry }) {
   const composer = useComposer();
   const { data: config } = useConfig();
   const modelLabel = useModelLabel();
+  const loraLabel = useLoraLabel();
+  const upscale = useUpscale();
+  const upscaler = config?.upscale?.upscalers.find((u) => u.id === config.upscale.default);
   const run = useAction();
 
   const { data: folders } = useFolders();
@@ -360,6 +365,9 @@ function InfoPanel({ entry }: { entry: ImageEntry }) {
       </Menu>,
     ],
     ['Model', modelLabel(gen.model)],
+    ...(gen.loras?.length
+      ? [['LoRAs', gen.loras.map((l) => `${loraLabel(l.id)}${l.scale !== 1 ? ` ×${l.scale}` : ''}`).join(', ')] as [string, React.ReactNode]]
+      : []),
     ['Mode', gen.mode.replace(/-/g, ' ')],
     ['Created', new Date(job.finishedAt ?? gen.createdAt).toLocaleString()],
   ];
@@ -438,6 +446,18 @@ function InfoPanel({ entry }: { entry: ImageEntry }) {
           </Button>
           <Button onClick={() => actions.remix(gen, job)}>
             <Shuffle className="h-4 w-4" /> Remix ×4
+          </Button>
+          {upscaler && (
+            <Button
+              onClick={() => upscale(image.id, upscaler.scales[0], { upscaler: upscaler.id, folderId: job.folderId })}
+              disabled={Math.max(image.width, image.height) * upscaler.scales[0] > upscaler.maxSide}
+              title={upscaler.issue ?? `${upscaler.label}`}
+            >
+              <ImageUpscale className="h-4 w-4" /> Upscale ×{upscaler.scales[0]}
+            </Button>
+          )}
+          <Button onClick={() => actions.openOutside(job)}>
+            <ExternalLink className="h-4 w-4" /> Open in new tab
           </Button>
           <Button
             onClick={() => {

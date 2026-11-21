@@ -2,7 +2,7 @@
 // Boots the server with the offline mock providers on a temp data dir.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -83,6 +83,35 @@ test('generations pick a model, default to IMAGE_MODEL, and reject unknown ones'
   const tooMany = await api('POST', '/generations', { prompt: 'x', model: 'mock-gradient-alt', inputImages: [ref, ref, ref] });
   assert.equal(tooMany.status, 400);
   assert.match(tooMany.body.message, /at most 2/);
+});
+
+test('LoRAs follow the model mapping, get default strengths and are stored', async () => {
+  const { body: cfg } = await api('GET', '/config');
+  assert.deepEqual(cfg.image.loras.map((l) => [l.id, l.models, l.issue]), [
+    ['mock-film', ['mock-gradient'], null],
+    ['mock-sketch', ['mock-gradient', 'mock-gradient-alt'], null],
+    ['mock-edit', ['mock-gradient'], null],
+  ]);
+
+  const gen = (await api('POST', '/generations', { prompt: 'with loras', loras: [{ id: 'mock-film', scale: 0.6 }, { id: 'mock-sketch' }, { id: 'mock-film' }] })).body;
+  assert.deepEqual(gen.loras, [{ id: 'mock-film', scale: 0.6 }, { id: 'mock-sketch', scale: 0.8 }]);
+  assert.equal((await api('GET', `/generations/${gen.id}/wait?timeout=30`)).body.status, 'completed');
+  assert.deepEqual((await api('POST', '/generations', { prompt: 'none' })).body.loras, []);
+
+  const wrongModel = await api('POST', '/generations', { prompt: 'x', model: 'mock-gradient-alt', loras: [{ id: 'mock-film' }] });
+  assert.equal(wrongModel.status, 400);
+  assert.match(wrongModel.body.message, /doesn't support/);
+  const unknown = await api('POST', '/generations', { prompt: 'x', loras: [{ id: 'nope' }] });
+  assert.equal(unknown.status, 400);
+  assert.match(unknown.body.message, /Unknown LoRA/);
+  assert.equal((await api('POST', '/generations', { prompt: 'x', loras: [{ id: 'mock-film', scale: 5 }] })).status, 400);
+
+  // Edit LoRAs need a reference image.
+  const noImage = await api('POST', '/generations', { prompt: 'x', loras: [{ id: 'mock-edit' }] });
+  assert.equal(noImage.status, 400);
+  assert.match(noImage.body.message, /add one as a reference/);
+  const ref = `data:image/png;base64,${(await png(64, 64, '#00f')).toString('base64')}`;
+  assert.equal((await api('POST', '/generations', { prompt: 'x', inputImages: [ref], loras: [{ id: 'mock-edit' }] })).status, 201);
 });
 
 test('text-to-image with variants runs through the queue', async () => {
@@ -260,4 +289,77 @@ test('folders: generate into, move images, filter, archive, delete', async () =>
   assert.equal((await api('DELETE', `/folders/${folder.id}?deleteImages=true`)).status, 204);
   const remaining = (await api('GET', `/generations/${gen.id}`)).body;
   assert.equal(remaining.jobs.length, 1);
+});
+
+test('deleting images keeps uploads; uploads are listed and deleted on their own', async () => {
+  const files = () => new Set(readdirSync(path.join(dataDir, 'images')));
+  const upload = async (color) => {
+    const form = new FormData();
+    form.append('files', new Blob([await png(64, 64, color)], { type: 'image/png' }), 'ref.png');
+    return (await (await fetch(`${BASE}/assets`, { method: 'POST', body: form })).json())[0];
+  };
+  const secret = 'zz-secret-prompt-to-erase';
+
+  const shared = await upload('#123456');
+  const a = (await api('POST', '/generations', { prompt: 'first user of the upload', inputImageIds: [shared.id], count: 2 })).body;
+  const doneA = (await api('GET', `/generations/${a.id}/wait?timeout=30`)).body;
+  const genFiles = doneA.jobs.map((j) => j.image.id);
+
+  // Bulk delete of all of A's images deletes the generation and its images, not the upload.
+  const del = await api('POST', '/images/delete', { ids: doneA.jobs.map((j) => j.id) });
+  assert.equal(del.status, 200);
+  assert.equal(del.body.deleted, 2);
+  assert.equal((await api('GET', `/generations/${a.id}`)).status, 404);
+  for (const id of genFiles) assert.equal((await api('GET', `/assets/${id}`)).status, 404);
+  assert.ok(![...files()].some((f) => genFiles.some((id) => f.startsWith(id))));
+  assert.equal((await api('GET', `/assets/${shared.id}`)).status, 200, 'uploads are kept');
+
+  // The uploads listing shows it with its usage count, then bulk delete removes it (even when used).
+  const used = await upload('#fedcba');
+  const c = (await api('POST', '/generations', { prompt: 'uses it', inputImageIds: [used.id] })).body;
+  await api('GET', `/generations/${c.id}/wait?timeout=30`);
+  const list = (await api('GET', '/assets?limit=200')).body;
+  assert.ok(list.items.every((u) => u.kind === 'upload'));
+  assert.equal(list.items.find((u) => u.id === used.id).usedBy, 1);
+  assert.equal(list.items.find((u) => u.id === shared.id).usedBy, 0);
+  const bulk = await api('POST', '/assets/delete', { ids: [shared.id, used.id, doneA.jobs[0].id] });
+  assert.equal(bulk.body.deleted, 2);
+  assert.equal((await api('GET', `/assets/${used.id}`)).status, 404);
+  assert.ok(![...files()].some((f) => f.startsWith(shared.id) || f.startsWith(used.id)));
+  assert.equal((await api('GET', `/generations/${c.id}`)).body.inputImages.length, 0, 'generation survives without its input');
+  await api('DELETE', `/generations/${c.id}`);
+
+  // A single upload can be deleted; a generated image can't through this route.
+  const loose = await upload('#abcdef');
+  assert.equal((await api('DELETE', `/assets/${loose.id}`)).status, 204);
+
+  // The prompt is gone from the database file itself, not just unlinked
+  // (deleted last, so no later write happens to overwrite it).
+  const last = (await api('POST', '/generations', { prompt: secret })).body;
+  await api('GET', `/generations/${last.id}/wait?timeout=30`);
+  assert.equal((await api('DELETE', `/generations/${last.id}`)).status, 204);
+  const db = ['imagegen.db', 'imagegen.db-wal']
+    .map((f) => path.join(dataDir, f))
+    .filter((f) => existsSync(f))
+    .map((f) => readFileSync(f).toString('latin1'))
+    .join('');
+  assert.ok(!db.includes(secret), 'deleted prompt still present on disk');
+});
+
+test('upscales queue a single-job generation with the scaled image', async () => {
+  const cfg = (await api('GET', '/config')).body;
+  assert.ok(cfg.upscale.upscalers.length >= 1);
+  const gen = (await api('POST', '/generations', { prompt: 'upscale me', aspectRatio: '1:1' })).body;
+  const done = (await api('GET', `/generations/${gen.id}/wait?timeout=30`)).body;
+  const src = done.jobs[0].image;
+  assert.equal((await api('POST', '/upscales', { imageId: src.id, scale: 3 })).status, 400, 'unsupported scale');
+  const up = await api('POST', '/upscales', { imageId: src.id, scale: 2 });
+  assert.equal(up.status, 201);
+  assert.equal(up.body.mode, 'upscale');
+  assert.deepEqual(up.body.upscale, { upscaler: cfg.upscale.default, scale: 2 });
+  assert.equal(up.body.prompt, 'upscale me');
+  const result = (await api('GET', `/generations/${up.body.id}/wait?timeout=30`)).body;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.jobs[0].image.width, src.width * 2);
+  assert.equal(result.jobs[0].image.height, src.height * 2);
 });

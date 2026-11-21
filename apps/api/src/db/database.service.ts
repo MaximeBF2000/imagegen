@@ -30,6 +30,10 @@ export interface GenerationRow {
   label: string | null;
   metadata: string | null; // JSON
   folder_id: string | null;
+  /** JSON { upscaler, scale } when this generation is an upscale of its input image. */
+  upscale: string | null;
+  /** JSON LoraRef[] ({ id, scale }), null when none. */
+  loras: string | null;
   created_at: number;
 }
 
@@ -113,7 +117,18 @@ const MIGRATIONS = [
    -- Folder membership is per image
    ALTER TABLE jobs ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
    CREATE INDEX jobs_folder ON jobs(folder_id, generation_id);`,
+  // v3: deleted rows are now zeroed on disk (secure_delete); the VACUUM run after
+  // this migration wipes what earlier deletes left behind in free pages.
+  `CREATE INDEX IF NOT EXISTS jobs_asset ON jobs(asset_id);`,
+  // v4: upscales are generations whose single job upscales the input image.
+  `ALTER TABLE generations ADD COLUMN upscale TEXT;
+   CREATE INDEX IF NOT EXISTS assets_kind ON assets(kind, created_at DESC);`,
+  // v5: LoRAs enabled for a generation (JSON [{ id, scale }]).
+  `ALTER TABLE generations ADD COLUMN loras TEXT;`,
 ];
+
+/** Migration after which a one-off VACUUM purges previously deleted data. */
+const VACUUM_AFTER = 3;
 
 /** Tiny SQLite layer on Node's built-in `node:sqlite` (no native addon to compile). */
 @Injectable()
@@ -123,7 +138,8 @@ export class DatabaseService implements OnModuleDestroy {
   constructor() {
     mkdirSync(config.dataDir, { recursive: true });
     this.db = new DatabaseSync(path.join(config.dataDir, 'imagegen.db'));
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    // secure_delete: deleted prompts/rows are overwritten, not left in free pages.
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;');
     this.migrate();
   }
 
@@ -134,6 +150,22 @@ export class DatabaseService implements OnModuleDestroy {
         this.db.exec(MIGRATIONS[v]);
         this.db.exec(`PRAGMA user_version = ${v + 1}`);
       });
+    }
+    if (version < VACUUM_AFTER && MIGRATIONS.length >= VACUUM_AFTER) {
+      this.db.exec('VACUUM');
+      this.flush();
+    }
+  }
+
+  /**
+   * Checkpoints and truncates the WAL so deleted data does not linger in it.
+   * Call after deleting user data.
+   */
+  flush() {
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch {
+      // Busy (a reader holds the WAL): the next flush or SQLite's auto-checkpoint will do it.
     }
   }
 

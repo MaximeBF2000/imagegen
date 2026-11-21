@@ -7,17 +7,24 @@ and swaps it when a request asks for another one from the MODELS registry:
   - flux2-klein-4b        FLUX.2 [klein] 4B (bf16): text-to-image, multi-reference editing, inpainting
   - qwen-image-2.1-turbo  Qwen-Image 2.1 Turbo, Q8 GGUF denoiser + Q8 GGUF uncensored Qwen3-VL encoder
                           (see qwen_gguf.py): text-to-image and multi-reference editing
+  - qwen-image-2.1        Qwen-Image 2.1 base (not distilled, QWEN_BASE_STEPS=30 steps), same encoder: slower,
+                          but what most LoRAs are trained on
+  - flux3-klein           FLUX 3 Image [klein], Q8 GGUF denoiser + Q8 GGUF uncensored Qwen3-VL-4B encoder
+                          (see flux3_gguf.py): text-to-image and multi-reference editing (16 steps)
 
 Tiny HTTP API used by the NestJS API:
 
   GET  /health            -> loading state, device, loaded model, available models
-  POST /generate          -> PNG bytes (text-to-image, multi-reference editing, inpainting)
+  POST /generate          -> PNG bytes (text-to-image, multi-reference editing, inpainting),
+                             optionally with LoRAs from the LORAS registry (see loras.py)
   POST /enhance           -> {"text": ...} chat completion with the loaded model's own text encoder
   POST /models/{id}/load  -> switch the resident model now (generate does it on demand)
-  POST /cancel/{request}  -> interrupt a running generation
+  POST /upscale           -> PNG bytes, upscaled with one of the UPSCALERS (see upscalers.py)
+  POST /cancel/{request}  -> interrupt a running generation or upscale
 
 Weights are loaded from the default Hugging Face cache (~/.cache/huggingface/hub,
-or $HF_HOME); nothing is stored in the app folder.
+or $HF_HOME); nothing is stored in the app folder. LoRA files live in
+$HF_HOME/loras (or LORA_DIR).
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from pathlib import Path
@@ -62,10 +69,17 @@ from fastapi.responses import Response  # noqa: E402
 from PIL import Image, ImageFilter  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+import loras  # noqa: E402
+from upscalers import DEFAULT_UPSCALER, UPSCALERS, UpscaleCancelled  # noqa: E402
+
 FLUX_REPO = "black-forest-labs/FLUX.2-klein-4B"
 # FLUX.2 klein only: 4 steps / guidance 1.0 is what the distilled model is tuned for.
 FLUX_STEPS = int(os.environ.get("INFERENCE_STEPS", "4"))
 FLUX_GUIDANCE = float(os.environ.get("INFERENCE_GUIDANCE", "1.0"))
+# FLUX 3 klein is step-distilled to 16 steps.
+FLUX3_STEPS = int(os.environ.get("FLUX3_STEPS", "16"))
+# Qwen-Image 2.1 base (non-Turbo): diffusers defaults to 40, LoRA authors mostly use 20-30.
+QWEN_BASE_STEPS = int(os.environ.get("QWEN_BASE_STEPS", "30"))
 
 log = logging.getLogger("inference")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [inference] %(message)s")
@@ -91,6 +105,8 @@ class Loaded:
     tokenizer: object
     lm: object
     inpaint_pipe: object = None
+    #: LoRAs loaded into `pipe` (they go away with it on a model swap).
+    loras: loras.LoraState = field(default_factory=loras.LoraState)
 
 
 def load_flux(device: str, dtype: torch.dtype) -> Loaded:
@@ -109,13 +125,25 @@ def load_flux(device: str, dtype: torch.dtype) -> Loaded:
     return Loaded("flux2-klein-4b", pipe, pipe.tokenizer, pipe.text_encoder, inpaint)
 
 
-def load_qwen(device: str, dtype: torch.dtype) -> Loaded:
+def load_qwen(device: str, dtype: torch.dtype, variant: str = "turbo") -> Loaded:
     import qwen_gguf
 
-    pipe = qwen_gguf.load_pipeline(dtype)
+    pipe = qwen_gguf.load_pipeline(dtype, variant)
     pipe.to(device)
     pipe.set_progress_bar_config(disable=True)
-    return Loaded("qwen-image-2.1-turbo", pipe, pipe.processor.tokenizer, pipe.text_encoder)
+    model_id = "qwen-image-2.1-turbo" if variant == "turbo" else "qwen-image-2.1"
+    return Loaded(model_id, pipe, pipe.processor.tokenizer, pipe.text_encoder)
+
+
+def load_qwen_base(device: str, dtype: torch.dtype) -> Loaded:
+    return load_qwen(device, dtype, "base")
+
+
+def load_flux3(device: str, dtype: torch.dtype) -> Loaded:
+    import flux3_gguf
+
+    pipe = flux3_gguf.load_pipeline(dtype).to(device)
+    return Loaded("flux3-klein", pipe, pipe.tokenizer, pipe.text_encoder)
 
 
 @dataclass
@@ -129,6 +157,8 @@ class ModelSpec:
 MODELS: dict[str, ModelSpec] = {
     "flux2-klein-4b": ModelSpec("FLUX.2 [klein] 4B", load_flux),
     "qwen-image-2.1-turbo": ModelSpec("Qwen-Image 2.1 Turbo (Q8 GGUF)", load_qwen, multiple=32),
+    "qwen-image-2.1": ModelSpec("Qwen-Image 2.1 (Q8 GGUF)", load_qwen_base, multiple=32),
+    "flux3-klein": ModelSpec("FLUX 3 Image [klein] (Q8 GGUF)", load_flux3),
 }
 ALIASES = {FLUX_REPO: "flux2-klein-4b"}
 
@@ -140,9 +170,9 @@ def resolve_model(model_id: Optional[str]) -> str:
     return model_id
 
 
-DEFAULT_MODEL = ALIASES.get(os.environ.get("IMAGE_MODEL", ""), os.environ.get("IMAGE_MODEL") or "flux2-klein-4b")
+DEFAULT_MODEL = ALIASES.get(os.environ.get("IMAGE_MODEL", ""), os.environ.get("IMAGE_MODEL") or "qwen-image-2.1-turbo")
 if DEFAULT_MODEL not in MODELS:
-    DEFAULT_MODEL = "flux2-klein-4b"
+    DEFAULT_MODEL = "qwen-image-2.1-turbo"
 
 
 class Engine:
@@ -211,16 +241,36 @@ class Engine:
                 raise Cancelled()
             load_seconds = self.ensure(model_id)
             m = self.current
+            self._apply_loras(m, model_id, req.loras)
             started = time.time()
             generator = torch.Generator("cpu").manual_seed(req.seed)
             refs = [decode_image(r) for r in req.references]
             multiple = MODELS[model_id].multiple
             callback = self._interrupt_cb(req.request_id)
             with torch.inference_mode():
-                if model_id == "qwen-image-2.1-turbo":
+                if model_id == "flux3-klein":
+                    if req.inpaint:
+                        raise HTTPException(400, "FLUX 3 klein has no native inpainting (the API emulates it)")
+                    # Step-distilled: 16 steps, no classifier-free guidance (`guidance` is ignored).
+                    image = m.pipe(
+                        prompt=req.prompt,
+                        image=refs or None,
+                        width=snap(req.width, multiple),
+                        height=snap(req.height, multiple),
+                        generator=generator,
+                        num_inference_steps=req.steps or FLUX3_STEPS,
+                        should_stop=lambda: bool(req.request_id) and req.request_id in self.cancelled,
+                    )
+                    if image is None:
+                        self.cancelled.discard(req.request_id)
+                        raise Cancelled()
+                elif model_id in ("qwen-image-2.1-turbo", "qwen-image-2.1"):
                     if req.inpaint:
                         raise HTTPException(400, "Qwen-Image 2.1 has no native inpainting (the API emulates it)")
-                    # Steps and sigmas come from the checkpoint (8-step Turbo schedule), guidance is off.
+                    # Turbo: steps and sigmas come from the checkpoint (8-step schedule). Base: QWEN_BASE_STEPS.
+                    # Both are meant to run without classifier-free guidance.
+                    steps = {} if model_id == "qwen-image-2.1-turbo" else {"num_inference_steps": req.steps or QWEN_BASE_STEPS}
+                    m.pipe._interrupt = False
                     image = m.pipe(
                         prompt=req.prompt,
                         image=refs or None,
@@ -228,6 +278,7 @@ class Engine:
                         height=snap(req.height, multiple),
                         generator=generator,
                         callback_on_step_end=callback,
+                        **steps,
                     ).images[0]
                 else:
                     common = dict(
@@ -270,6 +321,56 @@ class Engine:
             if self.device == "mps":
                 torch.mps.empty_cache()
             return image, time.time() - started, load_seconds
+
+    def _apply_loras(self, m: Loaded, model_id: str, requested: list["LoraInput"]) -> None:
+        if not hasattr(m.pipe, "load_lora_weights"):
+            if requested:
+                raise HTTPException(400, f"{MODELS[model_id].label} doesn't support LoRAs")
+            return
+        try:
+            loras.apply(m.pipe, m.loras, model_id, [(r.id, r.scale) for r in requested])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            log.exception("LoRA failed to load")
+            raise HTTPException(500, f"LoRA failed to load: {type(exc).__name__}: {exc}") from exc
+
+    # -- upscaling ------------------------------------------------------------
+
+    def upscale(self, req: "UpscaleRequest") -> tuple[Image.Image, float]:
+        upscaler = UPSCALERS.get(req.upscaler or DEFAULT_UPSCALER)
+        if upscaler is None:
+            raise HTTPException(400, f"Unknown upscaler {req.upscaler!r}. Available: {', '.join(UPSCALERS)}")
+        if req.scale not in upscaler.scales:
+            raise HTTPException(400, f"{upscaler.label} supports ×{', ×'.join(map(str, upscaler.scales))}")
+        problem = upscaler.availability()
+        if problem:
+            raise HTTPException(500, problem)
+        source = decode_image(req.image)
+        if max(source.size) * req.scale > upscaler.max_side:
+            raise HTTPException(400, f"The result would exceed {upscaler.max_side}px; pick a smaller factor.")
+        should_stop = lambda: bool(req.request_id) and req.request_id in self.cancelled  # noqa: E731
+        # Shares the GPU with the image models: one job at a time.
+        with self.lock:
+            if should_stop():
+                self.cancelled.discard(req.request_id)
+                raise Cancelled()
+            # The upscaler runs in another process: hand back what torch keeps cached.
+            gc.collect()
+            if self.device == "mps":
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+            started = time.time()
+            try:
+                image = upscaler.upscale(source, req.scale, req.seed, should_stop)
+            except UpscaleCancelled:
+                self.cancelled.discard(req.request_id)
+                raise Cancelled()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Upscale failed")
+                raise HTTPException(500, f"{upscaler.label} failed: {exc}") from exc
+            return image, time.time() - started
 
     def load(self, model_id: str) -> float:
         with self.lock:
@@ -352,6 +453,12 @@ class InpaintInput(BaseModel):
     strength: float = Field(1.0, ge=0, le=1)
 
 
+class LoraInput(BaseModel):
+    id: str
+    #: Strength: 1 = as trained, 0 = off, negative values invert the effect.
+    scale: float = Field(1.0, ge=-2, le=2)
+
+
 class GenerateRequest(BaseModel):
     model: Optional[str] = None
     prompt: str
@@ -362,6 +469,15 @@ class GenerateRequest(BaseModel):
     guidance: Optional[float] = None
     references: list[str] = []
     inpaint: Optional[InpaintInput] = None
+    loras: list[LoraInput] = []
+    request_id: Optional[str] = None
+
+
+class UpscaleRequest(BaseModel):
+    upscaler: Optional[str] = None
+    image: str
+    scale: int = 2
+    seed: int = 0
     request_id: Optional[str] = None
 
 
@@ -383,6 +499,8 @@ def health():
         "device": engine.device,
         "dtype": str(engine.dtype).replace("torch.", ""),
         "loadSeconds": engine.loaded_in,
+        "upscalers": [{"id": k, "label": u.label, "scales": list(u.scales), "issue": u.availability()} for k, u in UPSCALERS.items()],
+        "loras": [{"id": k, "label": l.label, "models": list(l.models), "issue": loras.availability(l)} for k, l in loras.LORAS.items()],
     }
 
 
@@ -396,6 +514,17 @@ async def generate(req: GenerateRequest):
     image.save(buf, format="PNG")
     headers = {"X-Inference-Seconds": f"{seconds:.2f}", "X-Load-Seconds": f"{load_seconds:.2f}"}
     return Response(buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.post("/upscale")
+async def upscale(req: UpscaleRequest):
+    try:
+        image, seconds = await run_in_threadpool(engine.upscale, req)
+    except Cancelled:
+        raise HTTPException(499, "Canceled")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png", headers={"X-Inference-Seconds": f"{seconds:.2f}"})
 
 
 @app.post("/models/{model_id}/load")

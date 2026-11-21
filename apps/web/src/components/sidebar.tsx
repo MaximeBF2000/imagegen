@@ -1,20 +1,36 @@
 'use client';
 
-import { Download, Folder as FolderIcon, FolderOpen, FolderPlus, Images, Inbox, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
+import { Download, Folder as FolderIcon, FolderOpen, FolderPlus, Images, Inbox, MoreHorizontal, Pencil, Trash2, Upload } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api, withToken } from '@/lib/api';
-import { useFolderActions, useFolders } from '@/lib/queries';
+import { useFolderActions, useFolders, useUploads } from '@/lib/queries';
 import { useUi } from '@/lib/store';
 import type { Folder, FolderScope } from '@/lib/types';
 import { cn, download } from '@/lib/utils';
 import { DRAG_TYPE, useFolderDialog } from './folders';
+import type { StudioPage } from './studio';
 import { Menu, MenuItem, MenuSeparator, Tip } from './ui/primitives';
 
-export function Sidebar() {
+/** Navigates to a folder scope, leaving the Uploads page if needed. */
+export function useGoToFolder(page: StudioPage) {
+  const router = useRouter();
+  const setFolder = useUi((s) => s.setFolder);
+  return (scope: FolderScope) => {
+    setFolder(scope);
+    if (page !== 'feed') router.push('/');
+  };
+}
+
+export function Sidebar({ page }: { page: StudioPage }) {
   const { data } = useFolders();
+  const uploads = useUploads();
+  const router = useRouter();
   const folder = useUi((s) => s.folder);
   const setFolder = useUi((s) => s.setFolder);
+  const goTo = useGoToFolder(page);
   const openDialog = useFolderDialog((s) => s.open);
+  const onFeed = page === 'feed';
 
   // The remembered folder no longer exists.
   useEffect(() => {
@@ -23,8 +39,15 @@ export function Sidebar() {
 
   return (
     <nav className="sticky top-[60px] hidden h-[calc(100dvh-60px)] w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-line px-3 py-5 lg:flex">
-      <NavItem scope="all" active={folder === 'all'} onClick={() => setFolder('all')} icon={<Images />} label="All images" count={data?.allCount} />
-      <NavItem scope="none" active={folder === 'none'} onClick={() => setFolder('none')} icon={<Inbox />} label="Unfiled" count={data?.unfiledCount} />
+      <NavItem scope="all" active={onFeed && folder === 'all'} onClick={() => goTo('all')} icon={<Images />} label="All images" count={data?.allCount} />
+      <NavItem scope="none" active={onFeed && folder === 'none'} onClick={() => goTo('none')} icon={<Inbox />} label="Unfiled" count={data?.unfiledCount} />
+      <NavItem
+        active={page === 'uploads'}
+        onClick={() => router.push('/uploads')}
+        icon={<Upload />}
+        label="Uploaded medias"
+        count={uploads.data?.pages[0]?.total}
+      />
 
       <div className="mb-1 mt-5 flex items-center justify-between px-2.5">
         <span className="text-[11px] font-medium uppercase tracking-wider text-subtle">Folders</span>
@@ -43,9 +66,9 @@ export function Sidebar() {
           key={f.id}
           scope={f.id}
           folder={f}
-          active={folder === f.id}
-          onClick={() => setFolder(f.id)}
-          icon={folder === f.id ? <FolderOpen /> : <FolderIcon />}
+          active={onFeed && folder === f.id}
+          onClick={() => goTo(f.id)}
+          icon={onFeed && folder === f.id ? <FolderOpen /> : <FolderIcon />}
           label={f.name}
           count={f.imageCount}
         />
@@ -72,7 +95,8 @@ function NavItem({
   label,
   count,
 }: {
-  scope: FolderScope;
+  /** Folder scope images can be dropped on (none for non-folder links). */
+  scope?: FolderScope;
   folder?: Folder;
   active: boolean;
   onClick: () => void;
@@ -84,7 +108,7 @@ function NavItem({
   const actions = useFolderActions();
   const openDialog = useFolderDialog((s) => s.open);
   const clearSelection = useUi((s) => s.clearSelection);
-  const droppable = scope !== 'all';
+  const droppable = scope !== undefined && scope !== 'all';
 
   return (
     <div
@@ -106,7 +130,7 @@ function NavItem({
         if (!droppable || !raw) return;
         e.preventDefault();
         const ids: string[] = JSON.parse(raw);
-        if (await actions.move(ids, scope === 'none' ? null : scope, label)) clearSelection();
+        if (await actions.move(ids, scope === 'none' ? null : scope!, label)) clearSelection();
       }}
     >
       <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-2.5 px-2.5 text-left text-[13.5px]">
